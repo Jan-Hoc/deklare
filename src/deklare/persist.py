@@ -13,7 +13,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License."""
 
-
 import io
 import json
 import warnings
@@ -24,7 +23,6 @@ from typing import Callable
 
 import math
 import pandas as pd
-import xarray as xr
 import zarr
 from cachetools import LRUCache
 from compress_pickle import dump, load
@@ -388,6 +386,12 @@ def get_segments(
         all_slices.append(selector)
 
     return all_slices
+
+
+try:
+    import xarray as xr
+except ImportError:
+    warnings.warn("Install xarray to use the default merge function of ChunkPersister")
 
 
 def merge_xarray(data, request):
