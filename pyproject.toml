@@ -1,0 +1,36 @@
+[project]
+name = "deklare"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "Matthias Meyer", email = "matthias.meyer@sdsc.ethz.ch" }
+]
+dependencies = [
+    "dask>=2024.5.1",
+    "numpy>=2.1.1",
+    "pandas>=2.2.3",
+    "zarr>=2.18.2",
+    "compress-pickle>=2.1.0",
+    "cachetools>=5.3.3",
+    "cdsapi>=0.7.0",
+]
+readme = "README.md"
+requires-python = ">= 3.12"
+
+[project.optional-dependencies]
+examples = [
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.rye]
+managed = true
+dev-dependencies = []
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deklare"]
