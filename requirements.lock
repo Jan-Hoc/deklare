@@ -12,39 +12,25 @@
 -e file:.
 asciitree==0.3.3
     # via zarr
-attrs==24.2.0
-    # via cads-api-client
 cachetools==5.5.0
     # via deklare
-cads-api-client==1.4.3
-    # via cdsapi
-cdsapi==0.7.3
-    # via deklare
-certifi==2024.8.30
-    # via requests
-charset-normalizer==3.3.2
-    # via requests
 click==8.1.7
     # via dask
-cloudpickle==3.0.0
+cloudpickle==3.1.0
     # via dask
 compress-pickle==2.1.0
     # via deklare
-dask==2024.9.1
+dask==2024.10.0
     # via deklare
 fasteners==0.19
     # via zarr
-fsspec==2024.9.0
+fsspec==2024.10.0
     # via dask
-idna==3.10
-    # via requests
 locket==1.0.0
     # via partd
-multiurl==0.3.1
-    # via cads-api-client
-numcodecs==0.13.0
+numcodecs==0.13.1
     # via zarr
-numpy==2.1.1
+numpy==2.1.3
     # via deklare
     # via numcodecs
     # via pandas
@@ -56,30 +42,17 @@ pandas==2.2.3
 partd==1.4.2
     # via dask
 python-dateutil==2.9.0.post0
-    # via multiurl
     # via pandas
 pytz==2024.2
-    # via multiurl
     # via pandas
 pyyaml==6.0.2
     # via dask
-requests==2.32.3
-    # via cads-api-client
-    # via cdsapi
-    # via multiurl
 six==1.16.0
     # via python-dateutil
-toolz==0.12.1
+toolz==1.0.0
     # via dask
     # via partd
-tqdm==4.66.5
-    # via cdsapi
-    # via multiurl
-typing-extensions==4.12.2
-    # via cads-api-client
 tzdata==2024.2
     # via pandas
-urllib3==2.2.3
-    # via requests
 zarr==2.18.3
     # via deklare

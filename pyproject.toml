@@ -1,17 +1,17 @@
 [project]
 name = "deklare"
-version = "0.1.1"
+version = "0.1.2"
 description = "A data processing framework for data exploration"
 authors = [
     { name = "Matthias Meyer", email = "contact@niowniow.net" }
 ]
 dependencies = [
     "dask>=2024.5.1",
-    "numpy>=2.1.1",
     "pandas>=2.2.3",
     "zarr>=2.18.2",
     "compress-pickle>=2.1.0",
     "cachetools>=5.3.3",
+    "numpy>=2",
 ]
 readme = "README.md"
 requires-python = ">= 3.12"
