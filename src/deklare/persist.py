@@ -20,6 +20,7 @@ from copy import copy, deepcopy
 from pathlib import Path
 from threading import Lock
 from typing import Callable
+from abc import ABC, abstractmethod
 
 import math
 import pandas as pd
@@ -58,8 +59,19 @@ def string_timestamp(o):
         return str(o)
 
 
+class Persister(ABC):
+
+    @abstractmethod
+    def configure(self, request=None):
+        pass
+
+    @abstractmethod
+    def compute(self, data=None, **request):
+        pass
+
+
 @task()
-class HashPersister:
+class HashPersister(Persister):
     def __init__(
         self,
         store=None,
@@ -172,8 +184,7 @@ class HashPersister:
 
         return request
 
-    def compute(self, data=None, **kwargs):
-        request = kwargs
+    def compute(self, data=None, **request):
         if request["action"] == "load_from_cache":
             with self._mutex:
                 cached = self.cache[request["request_hash"]]
@@ -413,7 +424,7 @@ def merge_xarray(data, request):
 
 
 @task()
-class ChunkPersister:
+class ChunkPersister(Persister):
     def __init__(
         self,
         store,
@@ -426,6 +437,7 @@ class ChunkPersister:
         reference: dict = None,
         force_update=False,
         merge_function=None,
+        persister: Persister=HashPersister,
     ):
         """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
@@ -477,6 +489,8 @@ class ChunkPersister:
             store = zarr.DirectoryStore(store)
         self.store = store
 
+        self.persister = persister
+
     def __dask_tokenize__(self):
         return (ChunkPersister,)
 
@@ -513,35 +527,35 @@ class ChunkPersister:
             minimal_number_of_segments=1,
         )
         cloned_requests = []
-        cloned_hashpersisters = []
+        cloned_persisters = []
         for segment in segments:
             segment_request = deepcopy(request)
             if "self" in segment_request:
                 del segment_request["self"]
             dict_update(segment_request, segment)
             cloned_requests += [segment_request]
-            cloned_hashpersister = HashPersister(
+            cloned_persister = self.persistor(
                 store=self.store,
             )
-            cloned_hashpersister.dask_key_name = self.dask_key_name + "_hashpersister"
+            cloned_persister.dask_key_name = self.dask_key_name + "_persister"
             dict_update(
                 segment_request,
                 {
                     "config": {
                         "keys": {
-                            self.dask_key_name + "_hashpersister": {
+                            self.dask_key_name + "_persister": {
                                 "force_update": rs.get("force_update", False)
                             }
                         }
                     }
                 },
             )
-            cloned_hashpersisters += [cloned_hashpersister.compute]
+            cloned_persisters += [cloned_persister.compute]
 
         # Insert predecessor
         # new_request = {}
         request["clone_dependencies"] = cloned_requests
-        request["insert_predecessor"] = cloned_hashpersisters
+        request["insert_predecessor"] = cloned_persisters
 
         return request
 
