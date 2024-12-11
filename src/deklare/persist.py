@@ -19,7 +19,7 @@ import warnings
 from copy import copy, deepcopy
 from pathlib import Path
 from threading import Lock
-from typing import Callable
+from typing import Callable, TypeVar, Generic
 from abc import ABC, abstractmethod
 
 import math
@@ -40,43 +40,54 @@ from .utils import (
     indexers_to_slices,
 )
 
-
-def to_pickle_with_store(store, filename, object, compression="gzip"):
-    bytes_buffer = io.BytesIO()
-    dump(object, bytes_buffer, compression=compression)
-    store[filename] = bytes_buffer.getvalue()
-
-
-def read_pickle_with_store(store, filename, compression="gzip"):
-    bytes_buffer = io.BytesIO(store[str(filename)])
-    return load(bytes_buffer, compression=compression)
-
-
-def string_timestamp(o):
-    if hasattr(o, "isoformat"):
-        return o.isoformat()
-    else:
-        return str(o)
-
-
-class Persister(ABC):
-
+# TODO: Redesign to StorageManager
+T = TypeVar('T')
+class StorageManager(ABC, Generic[T]):
     @abstractmethod
-    def configure(self, request=None):
+    def write(self, data: T) -> io.BytesIO:
+        """Takes the data and returns it as a buffer containing data in desired format
+
+        Args:
+            data (T): data to be saved
+
+        Returns:
+            io.BytesIO: buffer containing data in desired format
+        """
         pass
 
     @abstractmethod
-    def compute(self, data=None, **request):
+    def read(self, buffer: io.BytesIO) -> T:
+        """Read the data in buffer and returns the read data in the same format as it was received in write
+
+        Args:
+            buffer (io.BytesIO): buffer containing saved data
+
+        Returns:
+            T: data in buffer
+        """
         pass
+
+class PickleStorageManager(StorageManager):
+    def __init__(self, compression="gzip"):
+        super().__init__()
+        self.compression = compression
+
+    def write(self, data: T) -> io.BytesIO:
+        buffer = io.BytesIO()
+        dump(object, buffer, compression=self.compression)
+        return buffer
+
+    def read(self, buffer: io.BytesIO) -> T:
+        return load(buffer, compression=self.compression)
 
 
 @task()
-class HashPersister(Persister):
+class Persister():
     def __init__(
         self,
         store=None,
+        storage_manager: None|StorageManager=None,
         selected_keys=None,
-        compression=None,
         force_update=False,
         use_memorycache=True,
     ):
@@ -84,46 +95,14 @@ class HashPersister(Persister):
         if isinstance(store, str) or isinstance(store, Path):
             store = zarr.DirectoryStore(store)
         self.store = store
-        self.compression = compression
-        self._mutex = Lock()
-        # self.what_is_being_written = manager.dict()
-
+        self.storage_manager = storage_manager
+        self.cache = LRUCache(10)
         if selected_keys is None:
             # use all keys as hash
             pass
+        self._mutex = Lock()
 
-        self.cache = LRUCache(10)
-
-    def get_hash(self, request):
-        # ignore all configs that are meant for hashpersister
-        r = {k: v for k, v in request.items() if k != "self"}
-        s = json.dumps(r, sort_keys=True, skipkeys=True, default=string_timestamp)
-        request_hash = tokenize(s)
-
-        return request_hash
-
-    def is_valid(self, request):
-        """Checks if persisted object for `request`
-        exists and is valid (i.e. is not of type NodeFailedException).
-
-        Args:
-            request (dict): The request that should be checked
-
-        Returns:
-            boolean or None: Returns false if the persisted item is of type NodeFailedException
-                             Returns None if the request has not been persisted yet.
-        """
-        request_hash = self.get_hash(request)
-
-        if "fail/" + request_hash in self.store:
-            return False
-
-        if request_hash in self.store:
-            return True
-
-        return None
-
-    def configure(self, request=None):
+    def configure(self, request: T|None=None):
         request_hash = self.get_hash(request)
 
         # compute action defaults to passthrough
@@ -159,8 +138,7 @@ class HashPersister(Persister):
                 # set the compute action to load
                 request["self"]["action"] = "load"
                 return request
-
-            if "fail/" + request_hash in self.store:
+            elif "fail/" + request_hash in self.store:
                 # remove previous node since we are going to load the fail info from disk
                 request["remove_dependencies"] = True
                 request["self"]["request_hash"] = "fail/" + request_hash
@@ -169,35 +147,20 @@ class HashPersister(Persister):
                 request["self"]["action"] = "load"
                 return request
 
-            # # check if the file will be written to already
-            # if request_hash in self.what_is_being_written:
-            #     # yes? that's fine another process handled the same request
-            #     # we must tell the system to load the data regularly
-            #     # otherwise this node might not get data if the write wasn't
-            #     # finished before this node's compute call is processed
-            #     # let the system take care of optimizing potential double computations
-            #     return request
+            # TODO: check if the file will be written to already?
 
-            # # register that we are going to write to a file
-            # self.what_is_being_written[request_hash] = True
             request["self"]["action"] = "store"
 
         return request
 
-    def compute(self, data=None, **request):
+    def compute(self, data: T|None=None, **request):
         if request["action"] == "load_from_cache":
             with self._mutex:
                 cached = self.cache[request["request_hash"]]
             return cached
-        if request["action"] == "load":
-            data = read_pickle_with_store(
-                self.store,
-                request["request_hash"],
-                compression=self.compression,
-            )
-
-            if isinstance(data, str):
-                raise RuntimeError(f"something wrong read {data}")
+        elif request["action"] == "load":
+            buffer = io.BytesIO(self.store[request["request_hash"]])
+            data = self.storage_manager.read(buffer)
 
             with self._mutex:
                 self.cache[request["request_hash"]] = data
@@ -208,30 +171,18 @@ class HashPersister(Persister):
                 self.cache[request["request_hash"]] = data
 
                 # write to file
-                # TODO: write to tmp file and move in place
                 if isinstance(data, NodeFailedException):
-                    to_pickle_with_store(
-                        self.store,
-                        "fail/" + request["request_hash"],
-                        data,
-                        compression=self.compression,
-                    )
+                    buffer = self.storage_manager.write(data)
+                    self.store["fail/" + request["request_hash"]] = buffer.getvalue()
                 else:
                     if isinstance(data, str):
                         raise RuntimeError(f"something wrong {data}")
-                    to_pickle_with_store(
-                        self.store,
-                        request["request_hash"],
-                        data,
-                        compression=self.compression,
-                    )
+                    buffer = self.storage_manager.write(data)
+                    self.store[request["request_hash"]] = buffer.getvalue()
 
             except Exception as e:
                 print("Error during hashpersister", repr(e))
-            # finally:
-            #     with self._mutex:
-            #         # de-register this hash
-            #         del self.what_is_being_written[request["request_hash"]]
+
             with self._mutex:
                 self.cache[request["request_hash"]] = data
 
@@ -241,6 +192,47 @@ class HashPersister(Persister):
         else:
             raise NodeFailedException("A bug in HashPersister. Please report.")
 
+    def is_valid(self, request: dict):
+        """Checks if persisted object for `request`
+        exists and is valid (i.e. is not of type NodeFailedException).
+
+        Args:
+            request (dict): The request that should be checked
+
+        Returns:
+            boolean or None: Returns false if the persisted item is of type NodeFailedException
+                             Returns None if the request has not been persisted yet.
+        """
+        request_hash = self.get_hash(request)
+
+        if "fail/" + request_hash in self.store:
+            return False
+
+        if request_hash in self.store:
+            return True
+
+        return None
+
+    def get_hash(self, request: dict) -> str:
+        """returns the hash of the request
+
+        Args:
+            request (dict): request
+
+        Returns:
+            str: hash of the requenst
+        """
+        r = {k: v for k, v in request.items() if k != "self"}
+        s = json.dumps(r, sort_keys=True, skipkeys=True, default=self._string_timestamp)
+        request_hash = tokenize(s)
+
+        return request_hash
+
+    def _string_timestamp(o):
+        if hasattr(o, "isoformat"):
+            return o.isoformat()
+        else:
+            return str(o)
 
 def to_datetime(x, **kwargs):
     # overwrites default
@@ -437,7 +429,7 @@ class ChunkPersister(Persister):
         reference: dict = None,
         force_update=False,
         merge_function=None,
-        persister: Persister=HashPersister,
+        storage_manager: StorageManager=PickleStorageManager,
     ):
         """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
@@ -489,7 +481,7 @@ class ChunkPersister(Persister):
             store = zarr.DirectoryStore(store)
         self.store = store
 
-        self.persister = persister
+        self.storage_manager = storage_manager
 
     def __dask_tokenize__(self):
         return (ChunkPersister,)
@@ -534,8 +526,9 @@ class ChunkPersister(Persister):
                 del segment_request["self"]
             dict_update(segment_request, segment)
             cloned_requests += [segment_request]
-            cloned_persister = self.persistor(
+            cloned_persister = Persister(
                 store=self.store,
+                storage_manager=self.storage_manager
             )
             cloned_persister.dask_key_name = self.dask_key_name + "_persister"
             dict_update(
