@@ -16,7 +16,6 @@ limitations under the License."""
 import datetime
 from typing import Annotated, Any, Dict, Generic, TypeVar, get_args
 
-import numpy as np
 import pandas as pd
 from pydantic import BaseModel, model_validator
 from pydantic.functional_validators import AfterValidator
@@ -25,8 +24,12 @@ from pydantic.functional_validators import AfterValidator
 def to_datetime(v: Any) -> Any:
     return pd.to_datetime(v, utc=True).tz_localize(None)
 
+try:
+    import numpy as np 
+    T = TypeVar("T", str, datetime.datetime, datetime.date, int, float, type(np.datetime64))
+except:
+    T = TypeVar("T", str, datetime.datetime, datetime.date, int, float)
 
-T = TypeVar("T", str, datetime.datetime, datetime.date, int, float, type(np.datetime64))
 DateTimeType = Annotated[T, AfterValidator(to_datetime)]
 
 
@@ -46,10 +49,27 @@ class Range(BaseModel, Generic[T]):
 DatetimeRange = Range[DateTimeType]
 
 
+def transform_to_nested(input: dict, split: str=".") -> dict:
+    """
+    Transform the flat JSON keys with dots (split) into nested JSON keys.
+    """
+    transformed = {}
+    for key, value in input.items():
+        parts = key.split(split)
+        current = transformed
+        for part in parts[:-1]:
+            current = current.setdefault(part, {})
+        current[parts[-1]] = value
+    return transformed
+
+
 class Deskriptor(BaseModel, validate_assignment=True):
     @model_validator(mode="before")
     def dynamic_validator(cls, values: dict[str, Any]) -> dict[str, Any]:
         kwargs = {}
+        
+        values = transform_to_nested(values)
+
         for key, value in values.items():
             if key in cls.model_fields:
                 field_info = cls.model_fields[key]
@@ -68,6 +88,9 @@ class Deskriptor(BaseModel, validate_assignment=True):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]):
         kwargs = {}
+
+        data = transform_to_nested(data)
+
         for key, value in data.items():
             if key in cls.model_fields:
                 field_info = cls.model_fields[key]
