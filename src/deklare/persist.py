@@ -223,7 +223,7 @@ class Persister():
             str: hash of the requenst
         """
         r = {k: v for k, v in request.items() if k != "self"}
-        s = json.dumps(r, sort_keys=True, skipkeys=True, default=self._string_timestamp)
+        s = json.dumps(r, sort_keys=True, skipkeys=True, default=Persister._string_timestamp)
         request_hash = tokenize(s)
 
         return request_hash
