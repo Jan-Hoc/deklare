@@ -74,7 +74,7 @@ class PickleStorageManager(StorageManager):
 
     def write(self, data: T) -> io.BytesIO:
         buffer = io.BytesIO()
-        dump(object, buffer, compression=self.compression)
+        dump(data, buffer, compression=self.compression)
         return buffer
 
     def read(self, buffer: io.BytesIO) -> T:
@@ -429,7 +429,7 @@ class ChunkPersister:
         reference: dict = None,
         force_update=False,
         merge_function=None,
-        storage_manager: StorageManager=PickleStorageManager,
+        storage_manager: StorageManager=PickleStorageManager(),
     ):
         """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
