@@ -3,7 +3,8 @@ name = "deklare"
 version = "0.1.2"
 description = "A data processing framework for data exploration"
 authors = [
-    { name = "Matthias Meyer", email = "contact@niowniow.net" }
+    { name = "Matthias Meyer", email = "contact@niowniow.net" },
+    { name = "Jan Hochstrasser", email = "jhochstrasse@ethz.ch" }
 ]
 dependencies = [
     "dask>=2024.5.1",
