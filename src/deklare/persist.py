@@ -416,7 +416,7 @@ def merge_xarray(data, request):
 
 
 @task()
-class ChunkPersister(Persister):
+class ChunkPersister:
     def __init__(
         self,
         store,
