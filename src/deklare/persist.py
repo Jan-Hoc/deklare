@@ -44,7 +44,33 @@ from .utils import (
     indexers_to_slices,
 )
 
-# TODO: Redesign to StorageManager
+class StacIO(pystac.StacIO):
+    def __init__(self, store):
+        self.store = store
+
+    def read_text(self, source: pystac.utils.HREF, *args, **kwargs) -> str:
+        """Reads the data at `source` stored in the store
+
+        Args:
+            source : The source to read from.
+
+        Returns:
+            str: The text contained in the file at the location specified by the uri.
+        """
+        str_src = str(os.fspath(source))
+        return self.store[str_src].decode()
+
+    def write_text(
+        self, dest: pystac.utils.HREF, txt: str, *args, **kwargs) -> None:
+        """writes the data of `txt` into the store to `dest`
+
+        Args:
+            dest : The destination to write to.
+            txt : The text to write.
+        """
+        str_dest = str(os.fspath(dest))
+        self.store[str_dest] = txt.encode()
+
 T = TypeVar('T')
 class StorageManager(ABC, Generic[T]):
     @abstractmethod
@@ -108,6 +134,7 @@ class Persister():
         self,
         store=None,
         storage_manager: None|StorageManager=None,
+        stac_io: StacIO=None,
         selected_keys=None,
         force_update=False,
         use_memorycache=True,
@@ -122,6 +149,7 @@ class Persister():
             # use all keys as hash
             pass
         self._mutex = Lock()
+        self.stac_io = stac_io
 
     def configure(self, request: T|None=None):
         request_hash = self.get_hash(request)
@@ -199,7 +227,7 @@ class Persister():
                     if isinstance(data, str):
                         raise RuntimeError(f"something wrong {data}")
                     buffer = self.storage_manager.write(data)
-                    self.store[request["request_hash"]] = buffer.getvalue()
+                    self.store[f'./data/{request["request_hash"]}'] = buffer.getvalue()
                     self._save_metadata(request)
 
             except Exception as e:
@@ -276,7 +304,8 @@ class Persister():
         variables = request['variable']
         file_info = self.storage_manager.file_info()
 
-        item = pystac.Item(id=id,
+        item = pystac.Item(
+            id=id,
             geometry=footprint,
             bbox=bbox,
             datetime=None,
@@ -287,19 +316,26 @@ class Persister():
                 "variables": variables,
             },
         )
+        asset = pystac.Asset(
+            href=f'./../../data/{id}',
+            description=file_info[1],
+            media_type=file_info[0],
+            roles=['data'],
+        )
         item.add_asset(
             key='data',
-            asset=pystac.Asset(
-                href=id,
-                description=file_info[1],
-                media_type=file_info[0],
-                roles=['data'],
-            )
+            asset=asset
         )
+        # save in collection
+        collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io) # pretending location is absolute to stop stac from changing it
 
-        buffer = io.BytesIO()
-        dump(json.dumps(item.to_dict(), indent=4), buffer, compression=None)
-        self.store[id + '_STAC_item.json'] = json.dumps(item.to_dict(), indent=4).encode()
+        collection.add_item(item)
+
+        collection.save(
+            catalog_type=pystac.CatalogType.SELF_CONTAINED,
+            dest_href='./stac',
+            stac_io=self.stac_io,
+        )
 
     def _gen_description(request) -> str:
         """ generate human readable description for STAC Item of chunk
@@ -574,6 +610,33 @@ class ChunkPersister:
             store = zarr.DirectoryStore(store)
         self.store = store
 
+        # create collection if doesn't exist
+        self.collection = None
+        self.stac_io = StacIO(store=self.store)
+        try:
+            self.collection = pystac.Collection.from_file('./stac/collection.json', self.stac_io)
+        except:
+            #TODO: Create collection
+            self.collection = pystac.Collection(
+                id='',
+                description='',
+                extent=pystac.Extent(
+                    spatial=pystac.SpatialExtent([None]),
+                    temporal=pystac.TemporalExtent([[None, None]]),
+                ),
+                title='',
+                catalog_type=pystac.CatalogType.SELF_CONTAINED,
+                license='',
+                keywords=None,
+                providers=None,
+            )
+
+            self.collection.normalize_and_save(
+                root_href='/stac', # pretending location is absolute to stop stac from changing it
+                catalog_type=pystac.CatalogType.SELF_CONTAINED,
+                stac_io=self.stac_io,
+            )
+
         self.storage_manager = storage_manager
 
     def __dask_tokenize__(self):
@@ -621,7 +684,8 @@ class ChunkPersister:
             cloned_requests += [segment_request]
             cloned_persister = Persister(
                 store=self.store,
-                storage_manager=self.storage_manager
+                storage_manager=self.storage_manager,
+                stac_io=self.stac_io,
             )
             cloned_persister.dask_key_name = self.dask_key_name + "_persister"
             dict_update(
