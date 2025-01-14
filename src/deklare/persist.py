@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License."""
 
 import io
+import os
 import json
 import warnings
 from copy import copy, deepcopy
@@ -30,6 +31,9 @@ from compress_pickle import dump, load
 
 # TODO: can we implement our own hash function for deskriptors to reduce dependency on dask?
 from dask.base import tokenize
+
+import pystac
+from shapely.geometry import Polygon, mapping
 
 from .core import task
 from .deskribe import Range
@@ -67,6 +71,17 @@ class StorageManager(ABC, Generic[T]):
         """
         pass
 
+    @abstractmethod
+    def file_info(self) -> tuple[str, str]:
+        """return media type and text describtion of file saved in `write` function
+        media type should be registered in https://www.iana.org/assignments/media-types/media-types.xhtml e.g. `image/tiff`
+        description should be human readable with information needed to read file
+
+        Returns:
+            tuple[str, str]: (media type, description)
+        """
+        pass
+
 class PickleStorageManager(StorageManager):
     def __init__(self, compression="gzip"):
         super().__init__()
@@ -79,6 +94,12 @@ class PickleStorageManager(StorageManager):
 
     def read(self, buffer: io.BytesIO) -> T:
         return load(buffer, compression=self.compression)
+
+    def file_info(self) -> tuple[str, str]:
+        return (
+            'application/octet-stream',
+            f'Pickle file using compression {self.compression}'
+        )
 
 
 @task()
@@ -179,6 +200,7 @@ class Persister():
                         raise RuntimeError(f"something wrong {data}")
                     buffer = self.storage_manager.write(data)
                     self.store[request["request_hash"]] = buffer.getvalue()
+                    self._save_metadata(request)
 
             except Exception as e:
                 print("Error during hashpersister", repr(e))
@@ -227,6 +249,77 @@ class Persister():
         request_hash = tokenize(s)
 
         return request_hash
+
+    # TODO: add collection to metadata
+    def _save_metadata(self, request):
+        """saves metadata for given chunk using STAC (https://stacspec.org/)
+
+        Args:
+            request (dict): the request containing the temporal and spacial boundaries
+        """
+        id = request['request_hash']
+        bbox = [
+            request['longitude']['start'],
+            request['latitude']['end'],
+            request['longitude']['end'],
+            request['latitude']['start']
+        ]
+        footprint = mapping(Polygon([
+            [bbox[0], bbox[1]], # lower left corner
+            [bbox[0], bbox[3]], # upper left corner
+            [bbox[2], bbox[3]], # upper right corner
+            [bbox[2], bbox[1]], # lower right corner
+            [bbox[0], bbox[1]], # lower left corner
+        ]))
+        start_time = request['time']['start'].to_pydatetime()
+        end_time = request['time']['end'].to_pydatetime()
+        variables = request['variable']
+        file_info = self.storage_manager.file_info()
+
+        item = pystac.Item(id=id,
+            geometry=footprint,
+            bbox=bbox,
+            datetime=None,
+            start_datetime=start_time,
+            end_datetime=end_time,
+            properties={
+                "description": Persister._gen_description(request),
+                "variables": variables,
+            },
+        )
+        item.add_asset(
+            key='data',
+            asset=pystac.Asset(
+                href=id,
+                description=file_info[1],
+                media_type=file_info[0],
+                roles=['data'],
+            )
+        )
+
+        buffer = io.BytesIO()
+        dump(json.dumps(item.to_dict(), indent=4), buffer, compression=None)
+        self.store[id + '_STAC_item.json'] = json.dumps(item.to_dict(), indent=4).encode()
+
+    def _gen_description(request) -> str:
+        """ generate human readable description for STAC Item of chunk
+
+        Returns:
+            str: STAC Item description
+        """
+        start_time          = request['time']['start'].isoformat()
+        end_time            = request['time']['end'].isoformat()
+        variable_string     = ', '.join(request['variable'])
+        latitude_string     = f'{request['latitude']['start']} to {request['latitude']['end']} latitude'
+        longitude_string    = f'{request['longitude']['start']} to {request['longitude']['end']} longitude'
+
+        description         = (
+            f'This chunk contains data for the variable(s) {variable_string}, '
+            f'collected from {start_time} to {end_time}, '
+            f'covering the geographic region defined by {latitude_string} and {longitude_string}'
+        )
+
+        return description
 
     def _string_timestamp(o):
         if hasattr(o, "isoformat"):
