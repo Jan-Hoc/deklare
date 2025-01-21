@@ -557,6 +557,7 @@ class ChunkPersister:
         force_update=False,
         merge_function=None,
         storage_manager: StorageManager=PickleStorageManager(),
+        collection_metadata: dict={},
     ):
         """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
@@ -570,6 +571,8 @@ class ChunkPersister:
             reference (dict, optional): _description_. Defaults to None.
             force_update (bool, optional): _description_. Defaults to False.
             merge_function (_type_, optional): _description_. Defaults to None.
+            storage_manager (StorageManager, optional): Instance handling reading and writing of data. Defaults to PickleStorageManager.
+            collection_metadata (dict, optional): Further kwargs for STAC collection. May contain keys ['id', 'title', 'keywords', 'license', 'links', 'providers']. For 'links' and 'providers' lists of either corresponding STAC objects or dicts that can be used as kwargs to construct them. Defaults to {}.
         """
         # if callable(classification_scope):
         #     self.classification_scope = classification_scope
@@ -613,20 +616,13 @@ class ChunkPersister:
         try:
             collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io)
         except:
-            #TODO: Create collection
+            collection_metadata = ChunkPersister._process_collection_metadata(collection_metadata)
             collection = pystac.Collection(
-                id='',
-                description='',
-                extent=pystac.Extent(
-                    spatial=pystac.SpatialExtent([None]),
-                    temporal=pystac.TemporalExtent([[None, None]]),
-                ),
-                title='',
-                catalog_type=pystac.CatalogType.SELF_CONTAINED,
-                license='',
-                keywords=None,
-                providers=None,
+                **collection_metadata[0]
             )
+
+            for l in collection_metadata[1]:
+                collection.add_link(l)
 
             collection.normalize_and_save(
                 root_href='/stac', # pretend path is absolute so pystac doesnt try and change it
@@ -733,3 +729,54 @@ class ChunkPersister:
 
         section = self.merge(success, request)
         return section
+
+    def _process_collection_metadata(collection_metadata: dict={}) -> (dict, list):
+        """return dict with arguments to create pystac.Collection
+
+        Args:
+            collection_metadata (dict, optional): Dict containing keyword arguments for pystac.Collection constructor. Defaults to {}.
+
+        Returns:
+            (dict, list): dict with list of keyword arguments, list of pystac.Link objects to add to collection
+        """
+
+        links = []
+        if 'links' in collection_metadata and isinstance(collection_metadata['links'], list):
+            for l in collection_metadata['links']:
+                if isinstance(l, dict):
+                    l = pystac.Link(**l)
+                elif not isinstance(l, pystac.Link):
+                    continue
+                links.append(l)
+
+        kwargs = {
+            'id': '',
+            'description': '',
+            'extent': pystac.Extent(
+                spatial=pystac.SpatialExtent([None]),
+                temporal=pystac.TemporalExtent([[None, None]]),
+            ),
+            'title': '',
+            'catalog_type': pystac.CatalogType.SELF_CONTAINED,
+            'license': '',
+            'keywords': None,
+            'providers': None,
+        }
+
+        allowed_kwargs = ['id', 'title', 'keywords', 'license', 'providers']
+        for k in collection_metadata:
+            if k in allowed_kwargs:
+                kwargs[k] = collection_metadata[k]
+
+        if isinstance(kwargs['providers'], list):
+            providers = []
+            for p in kwargs['providers']:
+                if isinstance(p, dict):
+                    p = pystac.Provider(**p)
+                elif not isinstance(p, pystac.Provider):
+                    continue
+                providers.append(p)
+            kwargs['providers'] = providers
+
+
+        return (kwargs, links)
