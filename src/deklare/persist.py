@@ -227,11 +227,11 @@ class Persister():
                     if isinstance(data, str):
                         raise RuntimeError(f"something wrong {data}")
                     buffer = self.storage_manager.write(data)
-                    self.store[f'./data/{request["request_hash"]}'] = buffer.getvalue()
+                    self.store[f'/data/{request["request_hash"]}'] = buffer.getvalue()
                     self._save_metadata(request)
 
             except Exception as e:
-                print("Error during hashpersister", repr(e))
+                print("Error during Persister", repr(e))
 
             with self._mutex:
                 self.cache[request["request_hash"]] = data
@@ -240,7 +240,7 @@ class Persister():
         elif request["action"] == "passthrough":
             return data
         else:
-            raise NodeFailedException("A bug in HashPersister. Please report.")
+            raise NodeFailedException("A bug in Persister. Please report.")
 
     def is_valid(self, request: dict):
         """Checks if persisted object for `request`
@@ -278,7 +278,6 @@ class Persister():
 
         return request_hash
 
-    # TODO: add collection to metadata
     def _save_metadata(self, request):
         """saves metadata for given chunk using STAC (https://stacspec.org/)
 
@@ -326,14 +325,13 @@ class Persister():
             key='data',
             asset=asset
         )
+
         # save in collection
-        collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io) # pretending location is absolute to stop stac from changing it
-
+        collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io) # pretending location is absolute to stop stac from changing path
         collection.add_item(item)
-
         collection.save(
             catalog_type=pystac.CatalogType.SELF_CONTAINED,
-            dest_href='./stac',
+            dest_href='/stac', # pretend path is absolute so pystac doesnt try and change it
             stac_io=self.stac_io,
         )
 
@@ -611,13 +609,12 @@ class ChunkPersister:
         self.store = store
 
         # create collection if doesn't exist
-        self.collection = None
         self.stac_io = StacIO(store=self.store)
         try:
-            self.collection = pystac.Collection.from_file('./stac/collection.json', self.stac_io)
+            collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io)
         except:
             #TODO: Create collection
-            self.collection = pystac.Collection(
+            collection = pystac.Collection(
                 id='',
                 description='',
                 extent=pystac.Extent(
@@ -631,8 +628,8 @@ class ChunkPersister:
                 providers=None,
             )
 
-            self.collection.normalize_and_save(
-                root_href='/stac', # pretending location is absolute to stop stac from changing it
+            collection.normalize_and_save(
+                root_href='/stac', # pretend path is absolute so pystac doesnt try and change it
                 catalog_type=pystac.CatalogType.SELF_CONTAINED,
                 stac_io=self.stac_io,
             )
@@ -725,5 +722,14 @@ class ChunkPersister:
         if not success:
             failed = [str(d) for d in data if isinstance(d, NodeFailedException)]
             raise RuntimeError(f"Failed to load data. Reason: {failed}")
+
+        collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io) # pretend path is absolute so pystac doesnt try and change it
+        collection.update_extent_from_items()
+        collection.save(
+            catalog_type=pystac.CatalogType.SELF_CONTAINED,
+            dest_href='/stac', # pretend path is absolute so pystac doesnt try and change it
+            stac_io=self.stac_io,
+        )
+
         section = self.merge(success, request)
         return section
