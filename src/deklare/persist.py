@@ -153,6 +153,7 @@ class Persister():
 
     def configure(self, request: T|None=None):
         request_hash = self.get_hash(request)
+        data_path = f'/data/{request_hash}'
 
         # compute action defaults to passthrough
         request["self"]["action"] = "passthrough"
@@ -180,7 +181,7 @@ class Persister():
                 return request
 
             # while holding the mutex, we need to check if the file exists
-            if request_hash in self.store:
+            if data_path in self.store:
                 # remove previous node since we are going to load from disk
                 request["remove_dependencies"] = True
 
@@ -203,21 +204,23 @@ class Persister():
         return request
 
     def compute(self, data: T|None=None, **request):
+        data_path = f'/data/{request["request_hash"]}'
+
         if request["action"] == "load_from_cache":
             with self._mutex:
-                cached = self.cache[request["request_hash"]]
+                cached = self.cache[data_path]
             return cached
         elif request["action"] == "load":
-            buffer = io.BytesIO(self.store[request["request_hash"]])
+            buffer = io.BytesIO(self.store[data_path])
             data = self.storage_manager.read(buffer)
 
             with self._mutex:
-                self.cache[request["request_hash"]] = data
+                self.cache[data_path] = data
 
             return data
         elif request["action"] == "store":
             try:
-                self.cache[request["request_hash"]] = data
+                self.cache[data_path] = data
 
                 # write to file
                 if isinstance(data, NodeFailedException):
@@ -227,14 +230,14 @@ class Persister():
                     if isinstance(data, str):
                         raise RuntimeError(f"something wrong {data}")
                     buffer = self.storage_manager.write(data)
-                    self.store[f'/data/{request["request_hash"]}'] = buffer.getvalue()
+                    self.store[data_path] = buffer.getvalue()
                     self._save_metadata(request)
 
             except Exception as e:
                 print("Error during Persister", repr(e))
 
             with self._mutex:
-                self.cache[request["request_hash"]] = data
+                self.cache[data_path] = data
 
             return data
         elif request["action"] == "passthrough":
