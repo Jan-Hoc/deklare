@@ -766,9 +766,9 @@ class ChunkPersister:
             'providers': None,
         }
 
-        allowed_kwargs = ['id', 'title', 'keywords', 'license', 'providers']
+        blocked_kwargs = ['extent', 'catalog_type', 'links']
         for k in collection_metadata:
-            if k in allowed_kwargs:
+            if k not in blocked_kwargs:
                 kwargs[k] = collection_metadata[k]
 
         if isinstance(kwargs['providers'], list):
