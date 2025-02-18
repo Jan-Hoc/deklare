@@ -138,6 +138,7 @@ class Persister():
         selected_keys=None,
         force_update=False,
         use_memorycache=True,
+        global_lock=None,
     ):
         super().__init__(force_update=force_update, use_memorycache=use_memorycache)
         if isinstance(store, str) or isinstance(store, Path):
@@ -148,8 +149,10 @@ class Persister():
         if selected_keys is None:
             # use all keys as hash
             pass
-        self._mutex = Lock()
+
         self.stac_io = stac_io
+        self._global_lock = global_lock
+        self._mutex = Lock()
 
     def configure(self, request: T|None=None):
         request_hash = self.get_hash(request)
@@ -315,14 +318,15 @@ class Persister():
             asset=asset
         )
 
-        # save in collection
-        collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io) # pretending location is absolute to stop stac from changing path
-        collection.add_item(item)
-        collection.save(
-            catalog_type=pystac.CatalogType.SELF_CONTAINED,
-            dest_href='/stac', # pretend path is absolute so pystac doesnt try and change it
-            stac_io=self.stac_io,
-        )
+        # save in collection and avoid concurrency issues
+        with self._global_lock:
+            collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io) # pretending location is absolute to stop stac from changing path
+            collection.add_item(item)
+            collection.save(
+                catalog_type=pystac.CatalogType.SELF_CONTAINED,
+                dest_href='/stac', # pretend path is absolute so pystac doesnt try and change it
+                stac_io=self.stac_io,
+            )
 
     def _gen_description(request) -> str:
         """ generate human readable description for STAC Item of chunk
@@ -663,6 +667,7 @@ class ChunkPersister:
             )
 
         self.storage_manager = storage_manager
+        self.mutex = Lock()
 
     def __dask_tokenize__(self):
         return (ChunkPersister,)
@@ -711,6 +716,7 @@ class ChunkPersister:
                 store=self.store,
                 storage_manager=self.storage_manager,
                 stac_io=self.stac_io,
+                global_lock = self.mutex,
             )
             cloned_persister.dask_key_name = self.dask_key_name + "_persister"
             dict_update(
@@ -751,6 +757,7 @@ class ChunkPersister:
             failed = [str(d) for d in data if isinstance(d, NodeFailedException)]
             raise RuntimeError(f"Failed to load data. Reason: {failed}")
 
+        # update extents
         collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io) # pretend path is absolute so pystac doesnt try and change it
         collection.update_extent_from_items()
         collection.save(
