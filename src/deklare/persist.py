@@ -220,6 +220,13 @@ class Persister():
             return data
         elif request["action"] == "store":
             try:
+                # in this case we assume that the second element is additional metadata for the STAC item
+                if isinstance(data, tuple) and len(data) == 2 and isinstance(data[1], dict):
+                    item_metadata = data[1]
+                    data = data[0]
+                else:
+                    item_metadata = {}
+
                 self.cache[data_path] = data
 
                 # write to file
@@ -231,7 +238,7 @@ class Persister():
                         raise RuntimeError(f"something wrong {data}")
                     buffer = self.storage_manager.write(data)
                     self.store[data_path] = buffer.getvalue()
-                    self._save_metadata(request)
+                    self._save_metadata(request, item_metadata)
 
             except Exception as e:
                 print("Error during Persister", repr(e))
@@ -281,45 +288,24 @@ class Persister():
 
         return request_hash
 
-    def _save_metadata(self, request):
+    def _save_metadata(self, request: dict, item_metadata: dict) -> None:
         """saves metadata for given chunk using STAC (https://stacspec.org/)
 
         Args:
             request (dict): the request containing the temporal and spacial boundaries
+            item_metadata(dict): additional metadata passed by loader to save in STAC item
         """
-        id = request['request_hash']
-        bbox = [
-            request['longitude']['start'],
-            request['latitude']['end'],
-            request['longitude']['end'],
-            request['latitude']['start']
-        ]
-        footprint = mapping(Polygon([
-            [bbox[0], bbox[1]], # lower left corner
-            [bbox[0], bbox[3]], # upper left corner
-            [bbox[2], bbox[3]], # upper right corner
-            [bbox[2], bbox[1]], # lower right corner
-            [bbox[0], bbox[1]], # lower left corner
-        ]))
-        start_time = request['time']['start'].to_pydatetime()
-        end_time = request['time']['end'].to_pydatetime()
-        variables = request['variable']
-        file_info = self.storage_manager.file_info()
+
+        kwargs = Persister._gen_item_kwargs(request, item_metadata)
 
         item = pystac.Item(
-            id=id,
-            geometry=footprint,
-            bbox=bbox,
-            datetime=None,
-            start_datetime=start_time,
-            end_datetime=end_time,
-            properties={
-                "description": Persister._gen_description(request),
-                "variables": variables,
-            },
+            **kwargs
         )
+
+        file_info = self.storage_manager.file_info()
+
         asset = pystac.Asset(
-            href=f'./../../data/{id}',
+            href=f'./../../data/{request['request_hash']}',
             description=file_info[1],
             media_type=file_info[0],
             roles=['data'],
@@ -357,6 +343,49 @@ class Persister():
         )
 
         return description
+
+    def _gen_item_kwargs(request: dict, item_metadata: dict) -> dict:
+        id = request['request_hash']
+        bbox = [
+            request['longitude']['start'],
+            request['latitude']['end'],
+            request['longitude']['end'],
+            request['latitude']['start']
+        ]
+        footprint = mapping(Polygon([
+            [bbox[0], bbox[1]], # lower left corner
+            [bbox[0], bbox[3]], # upper left corner
+            [bbox[2], bbox[3]], # upper right corner
+            [bbox[2], bbox[1]], # lower right corner
+            [bbox[0], bbox[1]], # lower left corner
+        ]))
+        start_time = request['time']['start'].to_pydatetime()
+        end_time = request['time']['end'].to_pydatetime()
+        variables = request['variable']
+
+        kwargs = {
+            'id': id,
+            'geometry': footprint,
+            'bbox': bbox,
+            'datetime': None,
+            'start_datetime': start_time,
+            'end_datetime': end_time,
+            'properties': {
+                'description': Persister._gen_description(request),
+                'variables': variables,
+            }
+        }
+
+        blocked_keys = kwargs.keys()
+        for k, v in item_metadata.items():
+            if k not in blocked_keys:
+                kwargs[k] = v
+            elif k == 'properties' and isinstance(v, dict):
+                for k_p, v_p in v.items():
+                    if k_p != 'variables':
+                        kwargs[k][k_p] = v_p
+
+        return kwargs
 
     def _string_timestamp(o):
         if hasattr(o, "isoformat"):
@@ -733,7 +762,7 @@ class ChunkPersister:
         section = self.merge(success, request)
         return section
 
-    def _process_collection_metadata(collection_metadata: dict={}) -> (dict, list):
+    def _process_collection_metadata(collection_metadata: dict={}) -> tuple[dict, list]:
         """return dict with arguments to create pystac.Collection
 
         Args:
