@@ -517,7 +517,7 @@ def get_segments(
             iterator = pd.date_range(segment_start, segment_end, freq=_segment_stride)
             segment_end = pd.to_datetime(segment_end)
         else:
-            iterator = range(segment_start, segment_end, _segment_stride)
+            iterator = range(int(segment_start), int(segment_end), _segment_stride)
 
         slices = []
         for start in iterator:
@@ -758,13 +758,14 @@ class ChunkPersister:
             raise RuntimeError(f"Failed to load data. Reason: {failed}")
 
         # update extents
-        collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io) # pretend path is absolute so pystac doesnt try and change it
-        collection.update_extent_from_items()
-        collection.save(
-            catalog_type=pystac.CatalogType.SELF_CONTAINED,
-            dest_href='/stac', # pretend path is absolute so pystac doesnt try and change it
-            stac_io=self.stac_io,
-        )
+        with self.mutex:
+            collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io) # pretend path is absolute so pystac doesnt try and change it
+            collection.update_extent_from_items()
+            collection.save(
+                catalog_type=pystac.CatalogType.SELF_CONTAINED,
+                dest_href='/stac', # pretend path is absolute so pystac doesnt try and change it
+                stac_io=self.stac_io,
+            )
 
         section = self.merge(success, request)
         return section
