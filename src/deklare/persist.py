@@ -468,11 +468,18 @@ def get_segments(
                 dim_slices += [[dataset_scope_dim]]
                 continue
 
+            # make sure _segment_stride and _segment_slice have right orientation
+            if not isinstance(_segment_stride, pd.Timedelta):
+                if (dataset_scope_dim["end"] - dataset_scope_dim["start"]) * _segment_stride < 0:
+                    _segment_stride *= -1
+                if _segment_slice * _segment_stride < 0:
+                    _segment_slice *= -1
+
             segment_start = to_datetime_conditional(
-                dataset_scope_dim["start"], segment_slice[dim]
+                dataset_scope_dim["start"], _segment_slice
             )
             segment_end = to_datetime_conditional(
-                dataset_scope_dim["end"], segment_slice[dim]
+                dataset_scope_dim["end"], _segment_slice
             )
 
             if mode[dim] == "overlap":
@@ -485,18 +492,18 @@ def get_segments(
                 # then align to the grid if necessary
                 if dim in reference:
                     ref_dim = to_datetime_conditional(
-                        reference[dim], segment_slice[dim]
+                        reference[dim], _segment_slice
                     )
                     segment_start = (
                         math.ceil((segment_start - ref_dim) / _segment_stride)
                         * _segment_stride
                         + ref_dim
                     )
-                segment_end = segment_end + _segment_slice
+
             elif mode[dim] == "fit":
                 if dim in reference:
                     ref_dim = to_datetime_conditional(
-                        reference[dim], segment_slice[dim]
+                        reference[dim], _segment_slice
                     )
                     segment_start = (
                         math.floor((segment_start - ref_dim) / _segment_stride)
@@ -521,8 +528,11 @@ def get_segments(
 
         slices = []
         for start in iterator:
-            end = start + _segment_slice
-            if end <= segment_end or (
+            end = start + _segment_stride
+
+            if start <= end or (
+                not isinstance(_segment_stride, pd.Timedelta) and _segment_slice < 0 and start >= end
+            ) or (
                 len(slices) < minimal_number_of_segments
                 and not isinstance(dataset_scope_dim, list)
             ):
@@ -541,7 +551,6 @@ def get_segments(
                     slices.append(dataset_scope_dim[start:end])
                 else:
                     slices.append({"start": start, "end": end})
-
         dim_slices.append(slices)
 
     import itertools
@@ -586,7 +595,7 @@ class ChunkPersister:
         dim: str = "time",
         # classification_scope:dict | Callable[...,dict]=None,
         segment_slice: dict | Callable[..., dict] = None,
-        # segment_stride:dict|Callable[...,dict]=None,
+        segment_stride:dict|Callable[...,dict] = None,
         dataset_scope: dict | Callable[..., dict] = None,
         mode: str = "overlap",
         reference: dict = None,
@@ -622,11 +631,11 @@ class ChunkPersister:
         else:
             self.segment_slice = None
 
-        # if callable(segment_stride):
-        #     self.segment_stride = segment_stride
-        #     segment_stride = None
-        # else:
-        #     self.segment_stride = None
+        if callable(segment_stride):
+            self.segment_stride = segment_stride
+            segment_stride = None
+        else:
+            self.segment_stride = None
 
         self.merge = merge_function
         if self.merge is None:
@@ -636,7 +645,7 @@ class ChunkPersister:
             dim=dim,
             # classification_scope=classification_scope,
             segment_slice=segment_slice,
-            # segment_stride=segment_stride,
+            segment_stride=segment_stride,
             dataset_scope=dataset_scope,
             mode=mode,
             reference=reference,
@@ -694,11 +703,11 @@ class ChunkPersister:
         if rs.get("dataset_scope", None) is not None:
             dataset_scope.update(rs["dataset_scope"])
         segment_slice = get_value("segment_slice")
-        # segment_stride = get_value("segment_stride")
+        segment_stride = get_value("segment_stride")
         segments = get_segments(
             dataset_scope,
             segment_slice,
-            # segment_stride,
+            segment_stride,
             reference=rs["reference"],
             mode=rs["mode"],
             timestamps_as_strings=True,
