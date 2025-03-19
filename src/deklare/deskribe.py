@@ -24,9 +24,13 @@ from pydantic.functional_validators import AfterValidator
 def to_datetime(v: Any) -> Any:
     return pd.to_datetime(v, utc=True).tz_localize(None)
 
+
 try:
-    import numpy as np 
-    T = TypeVar("T", str, datetime.datetime, datetime.date, int, float, type(np.datetime64))
+    import numpy as np
+
+    T = TypeVar(
+        "T", str, datetime.datetime, datetime.date, int, float, type(np.datetime64)
+    )
 except:
     T = TypeVar("T", str, datetime.datetime, datetime.date, int, float)
 
@@ -49,7 +53,7 @@ class Range(BaseModel, Generic[T]):
 DatetimeRange = Range[DateTimeType]
 
 
-def transform_to_nested(input: dict, split: str=".") -> dict:
+def transform_to_nested(input: dict, split: str = ".") -> dict:
     """
     Transform the flat JSON keys with dots (split) into nested JSON keys.
     """
@@ -67,7 +71,7 @@ class Deskriptor(BaseModel, validate_assignment=True):
     @model_validator(mode="before")
     def dynamic_validator(cls, values: dict[str, Any]) -> dict[str, Any]:
         kwargs = {}
-        
+
         values = transform_to_nested(values)
 
         for key, value in values.items():
