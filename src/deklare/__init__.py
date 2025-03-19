@@ -18,7 +18,7 @@ import inspect
 
 from .core import it, task
 from .graph import Node, compute
-from .persist import ChunkPersister, HashPersister
+from .persist import ChunkPersister, Persister
 
 
 def deklare_flow(flow):
