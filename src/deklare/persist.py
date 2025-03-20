@@ -25,7 +25,6 @@ from abc import ABC, abstractmethod
 
 import math
 import pandas as pd
-import zarr
 from cachetools import LRUCache
 from compress_pickle import dump, load
 
@@ -43,6 +42,8 @@ from .utils import (
     exclusive_indexing,
     indexers_to_slices,
 )
+
+import fsspec 
 
 
 class StacIO(pystac.StacIO):
@@ -76,27 +77,51 @@ T = TypeVar("T")
 
 
 class StorageManager(ABC, Generic[T]):
+    # @abstractmethod
+    # def write_buffer(self, data: T, buffer: io.BytesIO =None) -> io.BytesIO:
+    #     """Takes the data and returns it as a buffer containing data in desired format
+
+    #     Args:
+    #         data (T): data to be saved
+
+    #     Returns:
+    #         io.BytesIO: buffer containing data in desired format
+    #     """
+    #     pass
+
+
+
+    # @abstractmethod
+    # def read_buffer(self, buffer: io.BytesIO) -> T:
+    #     """Read the data in buffer and returns the read data in the same format as it was received in write
+
+    #     Args:
+    #         buffer (io.BytesIO): buffer containing saved data
+
+    #     Returns:
+    #         T: data in buffer
+    #     """
+    #     pass
+
     @abstractmethod
-    def write(self, data: T) -> io.BytesIO:
-        """Takes the data and returns it as a buffer containing data in desired format
+    def write(self, file, data: T):
+        """Takes the data and writes it to the file
 
         Args:
             data (T): data to be saved
 
-        Returns:
-            io.BytesIO: buffer containing data in desired format
         """
         pass
 
     @abstractmethod
-    def read(self, buffer: io.BytesIO) -> T:
-        """Read the data in buffer and returns the read data in the same format as it was received in write
+    def read(self, file) -> T:
+        """Returns the read data in the same format as it was received in write
 
         Args:
-            buffer (io.BytesIO): buffer containing saved data
+            file (): file containing saved data
 
         Returns:
-            T: data in buffer
+            T: data from file
         """
         pass
 
@@ -117,14 +142,22 @@ class PickleStorageManager(StorageManager):
         super().__init__()
         self.compression = compression
 
-    def write(self, data: T) -> io.BytesIO:
-        buffer = io.BytesIO()
-        dump(data, buffer, compression=self.compression)
-        return buffer
+    
+    # def write_buffer(self, data: T, buffer: io.BytesIO =None) -> io.BytesIO:
+    #     if buffer is None:
+    #         buffer = io.BytesIO()
+    #     dump(data, buffer, compression=self.compression)
+    #     return buffer
 
-    def read(self, buffer: io.BytesIO) -> T:
-        return load(buffer, compression=self.compression)
+    # def read_buffer(self, buffer: io.BytesIO) -> T:
+    #     return load(buffer, compression=self.compression)
 
+    def write(self, file, data: T) -> io.BytesIO:
+        dump(data, file, compression=self.compression)
+
+    def read(self, file) -> T:
+        return load(file, compression=self.compression)
+    
     def file_info(self) -> tuple[str, str]:
         return (
             "application/octet-stream",
@@ -146,7 +179,7 @@ class Persister:
     ):
         super().__init__(force_update=force_update, use_memorycache=use_memorycache)
         if isinstance(store, str) or isinstance(store, Path):
-            store = zarr.DirectoryStore(store)
+            store = fsspec.get_mapper(store)
         self.store = store
         self.storage_manager = storage_manager
         self.cache = LRUCache(10)
@@ -211,15 +244,19 @@ class Persister:
         return request
 
     def compute(self, data: T | None = None, **request):
-        data_path = f"/data/{request['request_hash']}"
+        self.store.dirfs.mkdirs("data/",exist_ok=True)
+        data_path = f"data/{request['request_hash']}"
 
         if request["action"] == "load_from_cache":
             with self._mutex:
                 cached = self.cache[data_path]
             return cached
         elif request["action"] == "load":
-            buffer = io.BytesIO(self.store[data_path])
-            data = self.storage_manager.read(buffer)
+            # buffer = io.BytesIO(self.store[data_path])
+            # data = self.storage_manager.read_buffer(buffer)
+
+            f = self.store.dirfs.open(data_path)
+            data = self.storage_manager.read(f)
 
             with self._mutex:
                 self.cache[data_path] = data
@@ -242,13 +279,22 @@ class Persister:
 
                 # write to file
                 if isinstance(data, NodeFailedException):
-                    buffer = self.storage_manager.write(data)
-                    self.store["fail/" + request["request_hash"]] = buffer.getvalue()
+                    # buffer = self.storage_manager.write_buffer(data)
+                    # self.store["fail/" + request["request_hash"]] = buffer.getvalue()
+                    self.store.dirfs.mkdirs("fail/",exist_ok=True)
+                    with self.store.dirfs.open("fail/" + request["request_hash"],"wb") as f:
+                        self.storage_manager.write(f,data)
+
                 else:
                     if isinstance(data, str):
                         raise RuntimeError(f"something wrong {data}")
-                    buffer = self.storage_manager.write(data)
-                    self.store[data_path] = buffer.getvalue()
+                    
+                    # buffer = self.storage_manager.write_buffer(data)
+                    # self.store[data_path] = buffer.getvalue()
+
+                    with self.store.dirfs.open(data_path,"wb") as f:
+                        self.storage_manager.write(f,data)
+
                     self._save_metadata(request, item_metadata)
 
             except Exception as e:
@@ -609,7 +655,8 @@ def merge_xarray(data, request):
 class ChunkPersister:
     def __init__(
         self,
-        store,
+        store = None,
+        filesystem = None,
         dim: str = "time",
         # classification_scope:dict | Callable[...,dict]=None,
         segment_slice: dict | Callable[..., dict] = None,
@@ -670,12 +717,22 @@ class ChunkPersister:
             force_update=force_update,
         )
 
+        if filesystem is None and store is None:
+            raise RuntimeError("Either filesystem or store must be provided")
+
+        self.filesystem = filesystem
+
         if isinstance(store, str) or isinstance(store, Path):
-            store = zarr.DirectoryStore(store)
+            store = fsspec.get_mapper(store)
+
+        if store is None:
+            store = self.filesystem.get_mapper()
+
         self.store = store
 
+
         # create collection if doesn't exist
-        self.stac_io = StacIO(store=self.store)
+        self.stac_io = StacIO(store=store)
         try:
             collection = pystac.Collection.from_file(
                 "/stac/collection.json", self.stac_io
@@ -707,7 +764,7 @@ class ChunkPersister:
         def get_value(attr_name):
             # decide if we use the attribute provided in the request or
             # from a callback provided at initialization
-
+            value = None
             if rs.get(attr_name, None) is None:
                 # there is no attribute in the request, check for callback
                 callback = getattr(self, attr_name)
