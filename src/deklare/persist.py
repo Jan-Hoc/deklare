@@ -193,7 +193,7 @@ class Persister:
 
     def configure(self, request: T | None = None):
         request_hash = self.get_hash(request)
-        data_path = f"/data/{request_hash}"
+        data_path = f"data/{request_hash}"
 
         # compute action defaults to passthrough
         request["self"]["action"] = "passthrough"
@@ -372,12 +372,12 @@ class Persister:
         # save in collection and avoid concurrency issues
         with self._global_lock:
             collection = pystac.Collection.from_file(
-                "/stac/collection.json", self.stac_io
+                "stac/collection.json", self.stac_io
             )  # pretending location is absolute to stop stac from changing path
             collection.add_item(item)
             collection.save(
                 catalog_type=pystac.CatalogType.SELF_CONTAINED,
-                dest_href="/stac",  # pretend path is absolute so pystac doesnt try and change it
+                dest_href="stac",  # pretend path is absolute so pystac doesnt try and change it
                 stac_io=self.stac_io,
             )
 
@@ -735,7 +735,7 @@ class ChunkPersister:
         self.stac_io = StacIO(store=store)
         try:
             collection = pystac.Collection.from_file(
-                "/stac/collection.json", self.stac_io
+                "stac/collection.json", self.stac_io
             )
         except:
             collection_metadata = ChunkPersister._process_collection_metadata(
@@ -747,7 +747,7 @@ class ChunkPersister:
                 collection.add_link(l)
 
             collection.normalize_and_save(
-                root_href="/stac",  # pretend path is absolute so pystac doesnt try and change it
+                root_href="stac",  # pretend path is absolute so pystac doesnt try and change it
                 catalog_type=pystac.CatalogType.SELF_CONTAINED,
                 stac_io=self.stac_io,
             )
@@ -846,12 +846,12 @@ class ChunkPersister:
         # update extents
         with self.mutex:
             collection = pystac.Collection.from_file(
-                "/stac/collection.json", self.stac_io
+                "stac/collection.json", self.stac_io
             )  # pretend path is absolute so pystac doesnt try and change it
             collection.update_extent_from_items()
             collection.save(
                 catalog_type=pystac.CatalogType.SELF_CONTAINED,
-                dest_href="/stac",  # pretend path is absolute so pystac doesnt try and change it
+                dest_href="stac",  # pretend path is absolute so pystac doesnt try and change it
                 stac_io=self.stac_io,
             )
 
