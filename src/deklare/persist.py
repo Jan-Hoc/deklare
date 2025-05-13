@@ -25,7 +25,6 @@ from abc import ABC, abstractmethod
 
 import math
 import pandas as pd
-import zarr
 from cachetools import LRUCache
 from compress_pickle import dump, load
 
@@ -44,6 +43,9 @@ from .utils import (
     indexers_to_slices,
 )
 
+import fsspec 
+
+
 class StacIO(pystac.StacIO):
     def __init__(self, store):
         self.store = store
@@ -60,8 +62,7 @@ class StacIO(pystac.StacIO):
         str_src = str(os.fspath(source))
         return self.store[str_src].decode()
 
-    def write_text(
-        self, dest: pystac.utils.HREF, txt: str, *args, **kwargs) -> None:
+    def write_text(self, dest: pystac.utils.HREF, txt: str, *args, **kwargs) -> None:
         """writes the data of `txt` into the store to `dest`
 
         Args:
@@ -71,29 +72,56 @@ class StacIO(pystac.StacIO):
         str_dest = str(os.fspath(dest))
         self.store[str_dest] = txt.encode()
 
-T = TypeVar('T')
+
+T = TypeVar("T")
+
+
 class StorageManager(ABC, Generic[T]):
+    # @abstractmethod
+    # def write_buffer(self, data: T, buffer: io.BytesIO =None) -> io.BytesIO:
+    #     """Takes the data and returns it as a buffer containing data in desired format
+
+    #     Args:
+    #         data (T): data to be saved
+
+    #     Returns:
+    #         io.BytesIO: buffer containing data in desired format
+    #     """
+    #     pass
+
+
+
+    # @abstractmethod
+    # def read_buffer(self, buffer: io.BytesIO) -> T:
+    #     """Read the data in buffer and returns the read data in the same format as it was received in write
+
+    #     Args:
+    #         buffer (io.BytesIO): buffer containing saved data
+
+    #     Returns:
+    #         T: data in buffer
+    #     """
+    #     pass
+
     @abstractmethod
-    def write(self, data: T) -> io.BytesIO:
-        """Takes the data and returns it as a buffer containing data in desired format
+    def write(self, file, data: T):
+        """Takes the data and writes it to the file
 
         Args:
             data (T): data to be saved
 
-        Returns:
-            io.BytesIO: buffer containing data in desired format
         """
         pass
 
     @abstractmethod
-    def read(self, buffer: io.BytesIO) -> T:
-        """Read the data in buffer and returns the read data in the same format as it was received in write
+    def read(self, file) -> T:
+        """Returns the read data in the same format as it was received in write
 
         Args:
-            buffer (io.BytesIO): buffer containing saved data
+            file (): file containing saved data
 
         Returns:
-            T: data in buffer
+            T: data from file
         """
         pass
 
@@ -108,33 +136,42 @@ class StorageManager(ABC, Generic[T]):
         """
         pass
 
+
 class PickleStorageManager(StorageManager):
     def __init__(self, compression="gzip"):
         super().__init__()
         self.compression = compression
 
-    def write(self, data: T) -> io.BytesIO:
-        buffer = io.BytesIO()
-        dump(data, buffer, compression=self.compression)
-        return buffer
+    
+    # def write_buffer(self, data: T, buffer: io.BytesIO =None) -> io.BytesIO:
+    #     if buffer is None:
+    #         buffer = io.BytesIO()
+    #     dump(data, buffer, compression=self.compression)
+    #     return buffer
 
-    def read(self, buffer: io.BytesIO) -> T:
-        return load(buffer, compression=self.compression)
+    # def read_buffer(self, buffer: io.BytesIO) -> T:
+    #     return load(buffer, compression=self.compression)
 
+    def write(self, file, data: T) -> io.BytesIO:
+        dump(data, file, compression=self.compression)
+
+    def read(self, file) -> T:
+        return load(file, compression=self.compression)
+    
     def file_info(self) -> tuple[str, str]:
         return (
-            'application/octet-stream',
-            f'Pickle file using compression {self.compression}'
+            "application/octet-stream",
+            f"Pickle file using compression {self.compression}",
         )
 
 
 @task()
-class Persister():
+class Persister:
     def __init__(
         self,
         store=None,
-        storage_manager: None|StorageManager=None,
-        stac_io: StacIO=None,
+        storage_manager: None | StorageManager = None,
+        stac_io: StacIO = None,
         selected_keys=None,
         force_update=False,
         use_memorycache=True,
@@ -142,7 +179,7 @@ class Persister():
     ):
         super().__init__(force_update=force_update, use_memorycache=use_memorycache)
         if isinstance(store, str) or isinstance(store, Path):
-            store = zarr.DirectoryStore(store)
+            store = fsspec.get_mapper(store)
         self.store = store
         self.storage_manager = storage_manager
         self.cache = LRUCache(10)
@@ -154,9 +191,9 @@ class Persister():
         self._global_lock = global_lock
         self._mutex = Lock()
 
-    def configure(self, request: T|None=None):
+    def configure(self, request: T | None = None):
         request_hash = self.get_hash(request)
-        data_path = f'/data/{request_hash}'
+        data_path = f"data/{request_hash}"
 
         # compute action defaults to passthrough
         request["self"]["action"] = "passthrough"
@@ -206,16 +243,20 @@ class Persister():
 
         return request
 
-    def compute(self, data: T|None=None, **request):
-        data_path = f'/data/{request["request_hash"]}'
+    def compute(self, data: T | None = None, **request):
+        self.store.dirfs.mkdirs("data/",exist_ok=True)
+        data_path = f"data/{request['request_hash']}"
 
         if request["action"] == "load_from_cache":
             with self._mutex:
                 cached = self.cache[data_path]
             return cached
         elif request["action"] == "load":
-            buffer = io.BytesIO(self.store[data_path])
-            data = self.storage_manager.read(buffer)
+            # buffer = io.BytesIO(self.store[data_path])
+            # data = self.storage_manager.read_buffer(buffer)
+
+            f = self.store.dirfs.open(data_path)
+            data = self.storage_manager.read(f)
 
             with self._mutex:
                 self.cache[data_path] = data
@@ -224,7 +265,11 @@ class Persister():
         elif request["action"] == "store":
             try:
                 # in this case we assume that the second element is additional metadata for the STAC item
-                if isinstance(data, tuple) and len(data) == 2 and isinstance(data[1], dict):
+                if (
+                    isinstance(data, tuple)
+                    and len(data) == 2
+                    and isinstance(data[1], dict)
+                ):
                     item_metadata = data[1]
                     data = data[0]
                 else:
@@ -234,13 +279,22 @@ class Persister():
 
                 # write to file
                 if isinstance(data, NodeFailedException):
-                    buffer = self.storage_manager.write(data)
-                    self.store["fail/" + request["request_hash"]] = buffer.getvalue()
+                    # buffer = self.storage_manager.write_buffer(data)
+                    # self.store["fail/" + request["request_hash"]] = buffer.getvalue()
+                    self.store.dirfs.mkdirs("fail/",exist_ok=True)
+                    with self.store.dirfs.open("fail/" + request["request_hash"],"wb") as f:
+                        self.storage_manager.write(f,data)
+
                 else:
                     if isinstance(data, str):
                         raise RuntimeError(f"something wrong {data}")
-                    buffer = self.storage_manager.write(data)
-                    self.store[data_path] = buffer.getvalue()
+                    
+                    # buffer = self.storage_manager.write_buffer(data)
+                    # self.store[data_path] = buffer.getvalue()
+
+                    with self.store.dirfs.open(data_path,"wb") as f:
+                        self.storage_manager.write(f,data)
+
                     self._save_metadata(request, item_metadata)
 
             except Exception as e:
@@ -286,7 +340,9 @@ class Persister():
             str: hash of the requenst
         """
         r = {k: v for k, v in request.items() if k != "self"}
-        s = json.dumps(r, sort_keys=True, skipkeys=True, default=Persister._string_timestamp)
+        s = json.dumps(
+            r, sort_keys=True, skipkeys=True, default=Persister._string_timestamp
+        )
         request_hash = tokenize(s)
 
         return request_hash
@@ -301,92 +357,95 @@ class Persister():
 
         kwargs = Persister._gen_item_kwargs(request, item_metadata)
 
-        item = pystac.Item(
-            **kwargs
-        )
+        item = pystac.Item(**kwargs)
 
         file_info = self.storage_manager.file_info()
 
         asset = pystac.Asset(
-            href=f'./../../data/{request['request_hash']}',
+            href=f"./../../data/{request['request_hash']}",
             description=file_info[1],
             media_type=file_info[0],
-            roles=['data'],
+            roles=["data"],
         )
-        item.add_asset(
-            key='data',
-            asset=asset
-        )
+        item.add_asset(key="data", asset=asset)
 
         # save in collection and avoid concurrency issues
         with self._global_lock:
-            collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io) # pretending location is absolute to stop stac from changing path
+            collection = pystac.Collection.from_file(
+                "stac/collection.json", self.stac_io
+            )  # pretending location is absolute to stop stac from changing path
             collection.add_item(item)
             collection.save(
                 catalog_type=pystac.CatalogType.SELF_CONTAINED,
-                dest_href='/stac', # pretend path is absolute so pystac doesnt try and change it
+                dest_href="stac",  # pretend path is absolute so pystac doesnt try and change it
                 stac_io=self.stac_io,
             )
 
     def _gen_description(request) -> str:
-        """ generate human readable description for STAC Item of chunk
+        """generate human readable description for STAC Item of chunk
 
         Returns:
             str: STAC Item description
         """
-        start_time          = request['time']['start'].isoformat()
-        end_time            = request['time']['end'].isoformat()
-        variable_string     = ', '.join(request['variable'])
-        latitude_string     = f'{request['latitude']['start']} to {request['latitude']['end']} latitude'
-        longitude_string    = f'{request['longitude']['start']} to {request['longitude']['end']} longitude'
+        start_time = request["time"]["start"].isoformat()
+        end_time = request["time"]["end"].isoformat()
+        variable_string = ", ".join(request["variable"])
+        latitude_string = (
+            f"{request['latitude']['start']} to {request['latitude']['end']} latitude"
+        )
+        longitude_string = f"{request['longitude']['start']} to {request['longitude']['end']} longitude"
 
-        description         = (
-            f'This chunk contains data for the variable(s) {variable_string}, '
-            f'collected from {start_time} to {end_time}, '
-            f'covering the geographic region defined by {latitude_string} and {longitude_string}'
+        description = (
+            f"This chunk contains data for the variable(s) {variable_string}, "
+            f"collected from {start_time} to {end_time}, "
+            f"covering the geographic region defined by {latitude_string} and {longitude_string}"
         )
 
         return description
 
     def _gen_item_kwargs(request: dict, item_metadata: dict) -> dict:
-        id = request['request_hash']
+        id = request["request_hash"]
         bbox = [
-            request['longitude']['start'],
-            request['latitude']['end'],
-            request['longitude']['end'],
-            request['latitude']['start']
+            request["longitude"]["start"],
+            request["latitude"]["end"],
+            request["longitude"]["end"],
+            request["latitude"]["start"],
         ]
-        footprint = mapping(Polygon([
-            [bbox[0], bbox[1]], # lower left corner
-            [bbox[0], bbox[3]], # upper left corner
-            [bbox[2], bbox[3]], # upper right corner
-            [bbox[2], bbox[1]], # lower right corner
-            [bbox[0], bbox[1]], # lower left corner
-        ]))
-        start_time = request['time']['start'].to_pydatetime()
-        end_time = request['time']['end'].to_pydatetime()
-        variables = request['variable']
+        footprint = mapping(
+            Polygon(
+                [
+                    [bbox[0], bbox[1]],  # lower left corner
+                    [bbox[0], bbox[3]],  # upper left corner
+                    [bbox[2], bbox[3]],  # upper right corner
+                    [bbox[2], bbox[1]],  # lower right corner
+                    [bbox[0], bbox[1]],  # lower left corner
+                ]
+            )
+        )
+        start_time = request["time"]["start"].to_pydatetime()
+        end_time = request["time"]["end"].to_pydatetime()
+        variables = request["variable"]
 
         kwargs = {
-            'id': id,
-            'geometry': footprint,
-            'bbox': bbox,
-            'datetime': None,
-            'start_datetime': start_time,
-            'end_datetime': end_time,
-            'properties': {
-                'description': Persister._gen_description(request),
-                'variables': variables,
-            }
+            "id": id,
+            "geometry": footprint,
+            "bbox": bbox,
+            "datetime": None,
+            "start_datetime": start_time,
+            "end_datetime": end_time,
+            "properties": {
+                "description": Persister._gen_description(request),
+                "variables": variables,
+            },
         }
 
         blocked_keys = kwargs.keys()
         for k, v in item_metadata.items():
             if k not in blocked_keys:
                 kwargs[k] = v
-            elif k == 'properties' and isinstance(v, dict):
+            elif k == "properties" and isinstance(v, dict):
                 for k_p, v_p in v.items():
-                    if k_p != 'variables':
+                    if k_p != "variables":
                         kwargs[k][k_p] = v_p
 
         return kwargs
@@ -396,6 +455,7 @@ class Persister():
             return o.isoformat()
         else:
             return str(o)
+
 
 def to_datetime(x, **kwargs):
     # overwrites default
@@ -470,7 +530,9 @@ def get_segments(
 
             # make sure _segment_stride and _segment_slice have right orientation
             if not isinstance(_segment_stride, pd.Timedelta):
-                if (dataset_scope_dim["end"] - dataset_scope_dim["start"]) * _segment_stride < 0:
+                if (
+                    dataset_scope_dim["end"] - dataset_scope_dim["start"]
+                ) * _segment_stride < 0:
                     _segment_stride *= -1
                 if _segment_slice * _segment_stride < 0:
                     _segment_slice *= -1
@@ -491,9 +553,7 @@ def get_segments(
                 )
                 # then align to the grid if necessary
                 if dim in reference:
-                    ref_dim = to_datetime_conditional(
-                        reference[dim], _segment_slice
-                    )
+                    ref_dim = to_datetime_conditional(reference[dim], _segment_slice)
                     segment_start = (
                         math.ceil((segment_start - ref_dim) / _segment_stride)
                         * _segment_stride
@@ -502,9 +562,7 @@ def get_segments(
 
             elif mode[dim] == "fit":
                 if dim in reference:
-                    ref_dim = to_datetime_conditional(
-                        reference[dim], _segment_slice
-                    )
+                    ref_dim = to_datetime_conditional(reference[dim], _segment_slice)
                     segment_start = (
                         math.floor((segment_start - ref_dim) / _segment_stride)
                         * _segment_stride
@@ -530,11 +588,17 @@ def get_segments(
         for start in iterator:
             end = start + _segment_stride
 
-            if start <= end or (
-                not isinstance(_segment_stride, pd.Timedelta) and _segment_slice < 0 and start >= end
-            ) or (
-                len(slices) < minimal_number_of_segments
-                and not isinstance(dataset_scope_dim, list)
+            if (
+                start <= end
+                or (
+                    not isinstance(_segment_stride, pd.Timedelta)
+                    and _segment_slice < 0
+                    and start >= end
+                )
+                or (
+                    len(slices) < minimal_number_of_segments
+                    and not isinstance(dataset_scope_dim, list)
+                )
             ):
                 if is_datetime(start):
                     if utc_no_tz:
@@ -591,18 +655,19 @@ def merge_xarray(data, request):
 class ChunkPersister:
     def __init__(
         self,
-        store,
+        store = None,
+        filesystem = None,
         dim: str = "time",
         # classification_scope:dict | Callable[...,dict]=None,
         segment_slice: dict | Callable[..., dict] = None,
-        segment_stride:dict|Callable[...,dict] = None,
+        segment_stride: dict | Callable[..., dict] = None,
         dataset_scope: dict | Callable[..., dict] = None,
         mode: str = "overlap",
         reference: dict = None,
         force_update=False,
         merge_function=None,
-        storage_manager: StorageManager=PickleStorageManager(),
-        collection_metadata: dict={},
+        storage_manager: StorageManager = PickleStorageManager(),
+        collection_metadata: dict = {},
     ):
         """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
@@ -652,25 +717,37 @@ class ChunkPersister:
             force_update=force_update,
         )
 
+        if filesystem is None and store is None:
+            raise RuntimeError("Either filesystem or store must be provided")
+
+        self.filesystem = filesystem
+
         if isinstance(store, str) or isinstance(store, Path):
-            store = zarr.DirectoryStore(store)
+            store = fsspec.get_mapper(store)
+
+        if store is None:
+            store = self.filesystem.get_mapper()
+
         self.store = store
 
+
         # create collection if doesn't exist
-        self.stac_io = StacIO(store=self.store)
+        self.stac_io = StacIO(store=store)
         try:
-            collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io)
-        except:
-            collection_metadata = ChunkPersister._process_collection_metadata(collection_metadata)
-            collection = pystac.Collection(
-                **collection_metadata[0]
+            collection = pystac.Collection.from_file(
+                "stac/collection.json", self.stac_io
             )
+        except:
+            collection_metadata = ChunkPersister._process_collection_metadata(
+                collection_metadata
+            )
+            collection = pystac.Collection(**collection_metadata[0])
 
             for l in collection_metadata[1]:
                 collection.add_link(l)
 
             collection.normalize_and_save(
-                root_href='/stac', # pretend path is absolute so pystac doesnt try and change it
+                root_href="stac",  # pretend path is absolute so pystac doesnt try and change it
                 catalog_type=pystac.CatalogType.SELF_CONTAINED,
                 stac_io=self.stac_io,
             )
@@ -687,7 +764,7 @@ class ChunkPersister:
         def get_value(attr_name):
             # decide if we use the attribute provided in the request or
             # from a callback provided at initialization
-
+            value = None
             if rs.get(attr_name, None) is None:
                 # there is no attribute in the request, check for callback
                 callback = getattr(self, attr_name)
@@ -728,7 +805,7 @@ class ChunkPersister:
                 store=self.store,
                 storage_manager=self.storage_manager,
                 stac_io=self.stac_io,
-                global_lock = self.mutex,
+                global_lock=self.mutex,
             )
             cloned_persister.dask_key_name = self.dask_key_name + "_persister"
             dict_update(
@@ -771,18 +848,22 @@ class ChunkPersister:
 
         # update extents
         with self.mutex:
-            collection = pystac.Collection.from_file('/stac/collection.json', self.stac_io) # pretend path is absolute so pystac doesnt try and change it
+            collection = pystac.Collection.from_file(
+                "stac/collection.json", self.stac_io
+            )  # pretend path is absolute so pystac doesnt try and change it
             collection.update_extent_from_items()
             collection.save(
                 catalog_type=pystac.CatalogType.SELF_CONTAINED,
-                dest_href='/stac', # pretend path is absolute so pystac doesnt try and change it
+                dest_href="stac",  # pretend path is absolute so pystac doesnt try and change it
                 stac_io=self.stac_io,
             )
 
         section = self.merge(success, request)
         return section
 
-    def _process_collection_metadata(collection_metadata: dict={}) -> tuple[dict, list]:
+    def _process_collection_metadata(
+        collection_metadata: dict = {},
+    ) -> tuple[dict, list]:
         """return dict with arguments to create pystac.Collection
 
         Args:
@@ -793,8 +874,10 @@ class ChunkPersister:
         """
 
         links = []
-        if 'links' in collection_metadata and isinstance(collection_metadata['links'], list):
-            for l in collection_metadata['links']:
+        if "links" in collection_metadata and isinstance(
+            collection_metadata["links"], list
+        ):
+            for l in collection_metadata["links"]:
                 if isinstance(l, dict):
                     l = pystac.Link(**l)
                 elif not isinstance(l, pystac.Link):
@@ -802,33 +885,32 @@ class ChunkPersister:
                 links.append(l)
 
         kwargs = {
-            'id': '',
-            'description': '',
-            'extent': pystac.Extent(
+            "id": "",
+            "description": "",
+            "extent": pystac.Extent(
                 spatial=pystac.SpatialExtent([None]),
                 temporal=pystac.TemporalExtent([[None, None]]),
             ),
-            'title': '',
-            'catalog_type': pystac.CatalogType.SELF_CONTAINED,
-            'license': '',
-            'keywords': None,
-            'providers': None,
+            "title": "",
+            "catalog_type": pystac.CatalogType.SELF_CONTAINED,
+            "license": "",
+            "keywords": None,
+            "providers": None,
         }
 
-        blocked_kwargs = ['extent', 'catalog_type', 'links']
+        blocked_kwargs = ["extent", "catalog_type", "links"]
         for k in collection_metadata:
             if k not in blocked_kwargs:
                 kwargs[k] = collection_metadata[k]
 
-        if isinstance(kwargs['providers'], list):
+        if isinstance(kwargs["providers"], list):
             providers = []
-            for p in kwargs['providers']:
+            for p in kwargs["providers"]:
                 if isinstance(p, dict):
                     p = pystac.Provider(**p)
                 elif not isinstance(p, pystac.Provider):
                     continue
                 providers.append(p)
-            kwargs['providers'] = providers
-
+            kwargs["providers"] = providers
 
         return (kwargs, links)

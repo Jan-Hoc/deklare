@@ -9,9 +9,9 @@ pip install deklare
 ```
 
 ## Development Quickstart
-- Clone the repo and open its folder in a terminal
-- [Install rye](https://rye.astral.sh/guide/installation/), then
-- Install dependencies
+1. Install uv: https://docs.astral.sh/uv/getting-started/installation/
+2. Clone this repository and open its folder
+3. Install project and dependencies
 ```
-rye sync --all-features
+uv sync
 ```
