@@ -7,7 +7,7 @@ authors = [
     { name = "Jan Hochstrasser", email = "jhochstrasse@ethz.ch" }
 ]
 dependencies = [
-    "dask>=2024.5.1",
+    "dask==2025.2.0",
     "pandas>=2.2.3",
     "zarr>=2.18.2",
     "compress-pickle>=2.1.0",
