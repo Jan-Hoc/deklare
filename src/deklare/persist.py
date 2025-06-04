@@ -771,7 +771,10 @@ class ChunkPersister:
                 if callback is not None and callable(callback):
                     value = callback(request)
                 else:
-                    RuntimeError("No valid classification_scope provided")
+                    # not passing segment_stride is okay
+                    if attr_name == "segment_stride":
+                        return None
+                    raise RuntimeError("No valid {attr_name} provided")
             else:
                 value = rs[attr_name]
             return value
