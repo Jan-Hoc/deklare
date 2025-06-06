@@ -43,7 +43,7 @@ from .utils import (
     indexers_to_slices,
 )
 
-import fsspec 
+import fsspec
 
 
 class StacIO(pystac.StacIO):
@@ -59,7 +59,7 @@ class StacIO(pystac.StacIO):
         Returns:
             str: The text contained in the file at the location specified by the uri.
         """
-        str_src = str(os.fspath(source))
+        str_src = str(source)
         return self.store[str_src].decode()
 
     def write_text(self, dest: pystac.utils.HREF, txt: str, *args, **kwargs) -> None:
@@ -69,7 +69,7 @@ class StacIO(pystac.StacIO):
             dest : The destination to write to.
             txt : The text to write.
         """
-        str_dest = str(os.fspath(dest))
+        str_dest = str(dest)
         self.store[str_dest] = txt.encode()
 
 
@@ -88,8 +88,6 @@ class StorageManager(ABC, Generic[T]):
     #         io.BytesIO: buffer containing data in desired format
     #     """
     #     pass
-
-
 
     # @abstractmethod
     # def read_buffer(self, buffer: io.BytesIO) -> T:
@@ -142,7 +140,6 @@ class PickleStorageManager(StorageManager):
         super().__init__()
         self.compression = compression
 
-    
     # def write_buffer(self, data: T, buffer: io.BytesIO =None) -> io.BytesIO:
     #     if buffer is None:
     #         buffer = io.BytesIO()
@@ -157,7 +154,7 @@ class PickleStorageManager(StorageManager):
 
     def read(self, file) -> T:
         return load(file, compression=self.compression)
-    
+
     def file_info(self) -> tuple[str, str]:
         return (
             "application/octet-stream",
@@ -176,6 +173,7 @@ class Persister:
         force_update=False,
         use_memorycache=True,
         global_lock=None,
+        save_metadata=False,
     ):
         super().__init__(force_update=force_update, use_memorycache=use_memorycache)
         if isinstance(store, str) or isinstance(store, Path):
@@ -190,6 +188,7 @@ class Persister:
         self.stac_io = stac_io
         self._global_lock = global_lock
         self._mutex = Lock()
+        self.save_metadata = save_metadata
 
     def configure(self, request: T | None = None):
         request_hash = self.get_hash(request)
@@ -244,7 +243,7 @@ class Persister:
         return request
 
     def compute(self, data: T | None = None, **request):
-        self.store.dirfs.mkdirs("data/",exist_ok=True)
+        self.store.dirfs.mkdirs("data/", exist_ok=True)
         data_path = f"data/{request['request_hash']}"
 
         if request["action"] == "load_from_cache":
@@ -281,21 +280,27 @@ class Persister:
                 if isinstance(data, NodeFailedException):
                     # buffer = self.storage_manager.write_buffer(data)
                     # self.store["fail/" + request["request_hash"]] = buffer.getvalue()
-                    self.store.dirfs.mkdirs("fail/",exist_ok=True)
-                    with self.store.dirfs.open("fail/" + request["request_hash"],"wb") as f:
-                        self.storage_manager.write(f,data)
+                    self.store.dirfs.mkdirs("fail/", exist_ok=True)
+                    with self.store.dirfs.open(
+                        "fail/" + request["request_hash"], "wb"
+                    ) as f:
+                        self.storage_manager.write(f, data)
 
                 else:
                     if isinstance(data, str):
                         raise RuntimeError(f"something wrong {data}")
-                    
+
                     # buffer = self.storage_manager.write_buffer(data)
                     # self.store[data_path] = buffer.getvalue()
+                    try:
+                        with self.store.dirfs.open(data_path, "wb") as f:
+                            self.storage_manager.write(f, data)
+                    except Exception as e:
+                        self.store.dirfs.rm(data_path)
+                        raise e
 
-                    with self.store.dirfs.open(data_path,"wb") as f:
-                        self.storage_manager.write(f,data)
-
-                    self._save_metadata(request, item_metadata)
+                    if self.save_metadata:
+                        self._save_metadata(request, item_metadata)
 
             except Exception as e:
                 print("Error during Persister", repr(e))
@@ -512,6 +517,9 @@ def get_segments(
         _segment_stride = segment_stride.get(dim, _segment_slice)
 
         dataset_scope_dim = dataset_scope[dim]
+        if not isinstance(dataset_scope_dim, (list, Range, dict)):
+            dataset_scope_dim = [dataset_scope_dim]
+
         if isinstance(dataset_scope_dim, list):
             segment_start = 0
             segment_end = len(dataset_scope_dim)
@@ -638,7 +646,9 @@ def merge_xarray(data, request):
     for i in range(len(data)):
         if hasattr(data[i], "name") and (not data[i].name or data[i].name is None):
             data[i].name = "data"
-    merged_dataset = xr.merge(data)
+    # merged_dataset = xr.merge(data)
+    merged_dataset = xr.concat(data, dim="time")
+
     # if hasattr(data[0], "name"):
     #     merged_dataset = merged_dataset[data[0].name]
     indexers = {}
@@ -655,8 +665,8 @@ def merge_xarray(data, request):
 class ChunkPersister:
     def __init__(
         self,
-        store = None,
-        filesystem = None,
+        store=None,
+        filesystem=None,
         dim: str = "time",
         # classification_scope:dict | Callable[...,dict]=None,
         segment_slice: dict | Callable[..., dict] = None,
@@ -668,6 +678,7 @@ class ChunkPersister:
         merge_function=None,
         storage_manager: StorageManager = PickleStorageManager(),
         collection_metadata: dict = {},
+        save_metadata=False,
     ):
         """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
@@ -706,6 +717,8 @@ class ChunkPersister:
         if self.merge is None:
             self.merge = merge_xarray
 
+        self.save_metadata = save_metadata
+
         super().__init__(
             dim=dim,
             # classification_scope=classification_scope,
@@ -730,27 +743,28 @@ class ChunkPersister:
 
         self.store = store
 
-
-        # create collection if doesn't exist
         self.stac_io = StacIO(store=store)
-        try:
-            collection = pystac.Collection.from_file(
-                "stac/collection.json", self.stac_io
-            )
-        except:
-            collection_metadata = ChunkPersister._process_collection_metadata(
-                collection_metadata
-            )
-            collection = pystac.Collection(**collection_metadata[0])
 
-            for l in collection_metadata[1]:
-                collection.add_link(l)
+        if self.save_metadata:
+            # create collection if doesn't exist
+            try:
+                collection = pystac.Collection.from_file(
+                    "stac/collection.json", self.stac_io
+                )
+            except:
+                collection_metadata = ChunkPersister._process_collection_metadata(
+                    collection_metadata
+                )
+                collection = pystac.Collection(**collection_metadata[0])
 
-            collection.normalize_and_save(
-                root_href="stac",  # pretend path is absolute so pystac doesnt try and change it
-                catalog_type=pystac.CatalogType.SELF_CONTAINED,
-                stac_io=self.stac_io,
-            )
+                for l in collection_metadata[1]:
+                    collection.add_link(l)
+
+                collection.normalize_and_save(
+                    root_href="stac",  # pretend path is absolute so pystac doesnt try and change it
+                    catalog_type=pystac.CatalogType.SELF_CONTAINED,
+                    stac_io=self.stac_io,
+                )
 
         self.storage_manager = storage_manager
         self.mutex = Lock()
@@ -806,6 +820,7 @@ class ChunkPersister:
                 storage_manager=self.storage_manager,
                 stac_io=self.stac_io,
                 global_lock=self.mutex,
+                save_metadata=self.save_metadata,
             )
             cloned_persister.dask_key_name = self.dask_key_name + "_persister"
             dict_update(
@@ -833,7 +848,7 @@ class ChunkPersister:
         def unpack_list(inputlist):
             new_list = []
             for item in inputlist:
-                if isinstance(item, list):
+                if isinstance(item, (tuple, list)):
                     new_list += unpack_list(item)
                 else:
                     new_list += [item]
@@ -846,17 +861,18 @@ class ChunkPersister:
             failed = [str(d) for d in data if isinstance(d, NodeFailedException)]
             raise RuntimeError(f"Failed to load data. Reason: {failed}")
 
-        # update extents
-        with self.mutex:
-            collection = pystac.Collection.from_file(
-                "stac/collection.json", self.stac_io
-            )  # pretend path is absolute so pystac doesnt try and change it
-            collection.update_extent_from_items()
-            collection.save(
-                catalog_type=pystac.CatalogType.SELF_CONTAINED,
-                dest_href="stac",  # pretend path is absolute so pystac doesnt try and change it
-                stac_io=self.stac_io,
-            )
+        if self.save_metadata:
+            # update extents
+            with self.mutex:
+                collection = pystac.Collection.from_file(
+                    "stac/collection.json", self.stac_io
+                )  # pretend path is absolute so pystac doesnt try and change it
+                collection.update_extent_from_items()
+                collection.save(
+                    catalog_type=pystac.CatalogType.SELF_CONTAINED,
+                    dest_href="stac",  # pretend path is absolute so pystac doesnt try and change it
+                    stac_io=self.stac_io,
+                )
 
         section = self.merge(success, request)
         return section
