@@ -11,9 +11,8 @@ import traceback
 
 
 def get_dataset_segments(
-    catalog, segment_slice="60 seconds", segment_stride="60 seconds", mode="overlap"
+    catalog, segment_slice="60 seconds", segment_stride="60 seconds", mode="overlap", reference=None
 ):
-    ref = {"time": pd.to_datetime("20200101")}
     mode = {"time": mode}
     segment_slice = {"time": pd.to_timedelta(segment_slice)}
     segment_stride = {"time": pd.to_timedelta(segment_stride)}
@@ -34,7 +33,7 @@ def get_dataset_segments(
             non_sliced_segment,
             segment_slice,
             segment_stride,
-            ref=ref,
+            reference=reference,
             mode=mode,
             timestamps_as_strings=True,
             minimal_number_of_segments=1,
@@ -46,7 +45,7 @@ def get_dataset_segments(
             segment["location"] = catalog_item["location"]
             segment["channel"] = catalog_item["channel"]
 
-        classification_segments += segments.tolist()
+        classification_segments += segments
 
     return classification_segments
 
@@ -123,7 +122,7 @@ class Dataset:
         for stream in stream_select:
             # check if dataset was persisted before
             values = None
-            values = self.flows[stream](deskriptor=deskriptor)
+            values = self.flows[stream].query(deskriptor)
 
             if isinstance(self.transforms, list):
                 if self.transforms[stream] is not None:
