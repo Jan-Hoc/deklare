@@ -89,6 +89,15 @@ class Deskriptor(BaseModel, validate_assignment=True):
                     kwargs[key] = value
         return kwargs
 
+    def to_dict(self) -> Dict[str, Any]:
+        result = {}
+        for field_name, field_value in self:
+            if isinstance(field_value, (DatetimeRange, Range)):
+                result[field_name] = dict(field_value)
+            else:
+                result[field_name] = field_value
+        return result
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]):
         kwargs = {}

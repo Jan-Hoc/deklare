@@ -35,11 +35,11 @@ def base_name(name):
 
 FUNCTION = 1
 DATA = 2
-REQUEST = 3
+DESKRIPTOR = 3
 
 # FUNCTION = 0
 # DATA = 1
-# REQUEST = 2
+# DESKRIPTOR = 2
 
 
 class App:
@@ -127,13 +127,13 @@ class FailSafeWrapper:
             return NodeFailedException(trace)
 
 
-def update_key_in_config(request, old_key, new_key):
-    if "config" in request:
-        if "keys" in request["config"]:
-            if old_key in request["config"]["keys"]:
-                request["config"]["keys"][new_key] = request["config"]["keys"].pop(
-                    old_key
-                )
+def update_key_in_config(deskriptor, old_key, new_key):
+    if "config" in deskriptor:
+        if "keys" in deskriptor["config"]:
+            if old_key in deskriptor["config"]["keys"]:
+                deskriptor["config"]["keys"][new_key] = deskriptor["config"][
+                    "keys"
+                ].pop(old_key)
 
 
 def generate_clone_key(current_node_name, to_clone_key, clone_id):
@@ -147,23 +147,23 @@ def generate_clone_key(current_node_name, to_clone_key, clone_id):
 # @profile
 def configuration(
     delayed,
-    request,
+    deskriptor,
     keys=None,
     default_merge=None,
     optimize_graph=True,
     dependants=None,
     clone_instead_merge=True,
 ):
-    """Configures each node of the graph by propagating the request from outputs
-    to inputs. Each node checks if it can fulfil the request and what it needs to fulfil
-    the request. If a node requires additional configurations to fulfil the request it
-    can set the 'requires_request' flag in the returned request and this function will
-    add the return request as a a new input to the node's __call__().
+    """Configures each node of the graph by propagating the deskriptor from outputs
+    to inputs. Each node checks if it can fulfil the deskriptor and what it needs to fulfil
+    the deskriptor. If a node requires additional configurations to fulfil the deskriptor it
+    can set the 'requires_deskriptor' flag in the returned deskriptor and this function will
+    add the return deskriptor as a a new input to the node's __call__().
     See also Node.configure()
 
     Args:
         delayed (dask.delayed or list): Delayed object or list of delayed objects
-        request (dict or list): request (dict), list of requests
+        deskriptor (dict or list): deskriptor (dict), list of deskriptors
         keys (_type_, optional): _description_. Defaults to None.
         default_merge (_type_, optional): _description_. Defaults to None.
         optimize_graph (bool, optional): _description_. Defaults to True.
@@ -195,27 +195,27 @@ def configuration(
         keys = [keys]
 
     work = list(set(flatten(keys)))
-    # create a deepcopy, otherwise we might overwrite requests and falsify its usage outside of this function
-    # request = deepcopy(request)
-    if isinstance(request, list):
-        # request = [NestedFrozenDict(r) for r in request if r]
-        request = [r for r in request if r]
-        if len(request) != len(work):
+    # create a deepcopy, otherwise we might overwrite deskriptors and falsify its usage outside of this function
+    # deskriptor = deepcopy(deskriptor)
+    if isinstance(deskriptor, list):
+        # deskriptor = [NestedFrozenDict(r) for r in deskriptor if r]
+        deskriptor = [r for r in deskriptor if r]
+        if len(deskriptor) != len(work):
             raise RuntimeError(
-                "When passing multiple request items "
-                "The number of request items must be same "
+                "When passing multiple deskriptor items "
+                "The number of deskriptor items must be same "
                 "as the number of keys"
             )
 
-        # For each output node different request has been provided
-        requests = {work[i]: [request[i]] for i in range(len(request))}
+        # For each output node different deskriptor has been provided
+        deskriptors = {work[i]: [deskriptor[i]] for i in range(len(deskriptor))}
     else:
-        # request = NestedFrozenDict(request)
-        # Every output node receives the same request
-        requests = {k: [request] for k in work}
+        # deskriptor = NestedFrozenDict(deskriptor)
+        # Every output node receives the same deskriptor
+        deskriptors = {k: [deskriptor] for k in work}
 
     remove = {k: False for k in work}
-    input_requests = {}
+    input_deskriptors = {}
     # We will create a new graph with the configured nodes of the old graph
     # out_keys keeps track of the keys we have configured and
     # remember them for assembling the new graph
@@ -237,22 +237,22 @@ def configuration(
 
         out_keys += work
         for k in work:
-            # if k not in requests:
-            #     # there wasn't any request stored use initial config
-            #     requests[k] = [config]
+            # if k not in deskriptors:
+            #     # there wasn't any deskriptor stored use initial config
+            #     deskriptors[k] = [config]
 
             # check if we have collected all dependencies so far
             # we will come back to this node another time
             # TODO: make a better check for the case when dependants[k] is a set, also: why is it a set in the first place..?
             if (
                 k in dependants
-                # and len(dependants[k]) != len(requests[k])
+                # and len(dependants[k]) != len(deskriptors[k])
                 and not isinstance(dependants[k], set)
             ):
                 continue
 
-            if k not in requests:
-                InternalError(f"Failed to find request for node {k}")
+            if k not in deskriptors:
+                InternalError(f"Failed to find deskriptor for node {k}")
 
             # set configuration for this node k
             argument_is_node = None
@@ -268,63 +268,63 @@ def configuration(
             # Check if we get a node of type Node class
             if argument_is_node is not None:
                 # Yes, we've got a node class so we can use it's configure function
-                assert len(requests[k]) == 1
-                current_request = requests[k][0]
-                new_request = dsk_dict[k][argument_is_node].__self__.configure(
-                    current_request
+                assert len(deskriptors[k]) == 1
+                current_deskriptor = deskriptors[k][0]
+                new_deskriptor = dsk_dict[k][argument_is_node].__self__.configure(
+                    current_deskriptor
                 )  # Call the class configuration function
-                # if not isinstance(new_request, list):
-                #     new_request = [new_request]
+                # if not isinstance(new_deskriptor, list):
+                #     new_deskriptor = [new_deskriptor]
                 # # convert back to dicts (here we are allowed to modify it)
-                # new_request = [dict(r) for r in new_request]
+                # new_deskriptor = [dict(r) for r in new_deskriptor]
             else:
                 # We didn't get a Node class so there is no
                 # custom configuration function: pass through
-                new_request = {}
-                assert len(requests[k]) == 1
-                r = dict(requests[k][0])
+                new_deskriptor = {}
+                assert len(deskriptors[k]) == 1
+                r = dict(deskriptors[k][0])
                 if r:
-                    # sanitize request
-                    r.pop("requires_request", None)
+                    # sanitize deskriptor
+                    r.pop("requires_deskriptor", None)
                     r.pop("insert_predecessor", None)
                     r.pop("clone_dependencies", None)
                     r.pop("remove_dependency", None)
                     r.pop("remove_dependenies", None)
-                    new_request = r
+                    new_deskriptor = r
 
             # update dependencies
             # we're going to get all dependencies of this node
             # then, we'll check if this node requires to clone it's input path
-            # If so, each cloned path gets a different request from this node
+            # If so, each cloned path gets a different deskriptor from this node
             # (these are contained in a list in `clone_dependencies`)
             # we are going to introduce new keys and new nodes in the graph
             # therefore we must update this nodes input keys (hacking it from/to dsk_dict[k][DATA])
             # for each clone
 
-            # For now it's not possible to have predecessors and multiple requests
-            # User must use one request with `clone_dependencies` and `insert_predecessor` keys
+            # For now it's not possible to have predecessors and multiple deskriptors
+            # User must use one deskriptor with `clone_dependencies` and `insert_predecessor` keys
             insert_predecessor = []
             if (
-                new_request is not None
-                and not isinstance(new_request, list)
-                and "insert_predecessor" in new_request
-                and new_request["insert_predecessor"]
+                new_deskriptor is not None
+                and not isinstance(new_deskriptor, list)
+                and "insert_predecessor" in new_deskriptor
+                and new_deskriptor["insert_predecessor"]
             ):
-                insert_predecessor = new_request["insert_predecessor"]
-                del new_request["insert_predecessor"]
+                insert_predecessor = new_deskriptor["insert_predecessor"]
+                del new_deskriptor["insert_predecessor"]
 
             current_deps = get_dependencies(dsk_dict, k, as_list=True)
             k_in_keys = None
             if len(dsk_dict[k]) > DATA:
                 k_in_keys = deepcopy(dsk_dict[k][DATA])  # [DATA] equals in_keys in dict
 
-            if not isinstance(new_request, list):
-                clone_dependencies = [new_request]
+            if not isinstance(new_deskriptor, list):
+                clone_dependencies = [new_deskriptor]
             else:
-                clone_dependencies = new_request
+                clone_dependencies = new_deskriptor
 
-            # check if any of our current dependencies already has to fulfil a request
-            # since the request's might collide we should just duplicate it
+            # check if any of our current dependencies already has to fulfil a deskriptor
+            # since the deskriptor's might collide we should just duplicate it
             # in this run it gets a new name, and the existing one is left untouched until it's its turn.
             clone = False
             if clone_instead_merge:
@@ -333,37 +333,37 @@ def configuration(
                     k_in_keys = []
                 else:
                     for d in current_deps:
-                        if len(requests.get(d, [])) > 0:
+                        if len(deskriptors.get(d, [])) > 0:
                             clone = True
                             k_in_keys = []
 
             # if it's a list it automatically clones it, if its not
             # the user could use the clone_dependencies to clone it
             if (
-                new_request is not None
-                and not isinstance(new_request, list)
-                and "clone_dependencies" in new_request
-                and new_request["clone_dependencies"]
+                new_deskriptor is not None
+                and not isinstance(new_deskriptor, list)
+                and "clone_dependencies" in new_deskriptor
+                and new_deskriptor["clone_dependencies"]
             ):
-                clone_dependencies = new_request["clone_dependencies"]
-                del new_request["clone_dependencies"]
+                clone_dependencies = new_deskriptor["clone_dependencies"]
+                del new_deskriptor["clone_dependencies"]
                 clone = True
                 k_in_keys = []
 
             if (
-                new_request is not None
-                and not isinstance(new_request, list)
-                and "requires_request" in new_request
-                and new_request["requires_request"]
+                new_deskriptor is not None
+                and not isinstance(new_deskriptor, list)
+                and "requires_deskriptor" in new_deskriptor
+                and new_deskriptor["requires_deskriptor"]
             ):
-                del new_request["requires_request"]
-                # input_requests[k] = NestedFrozenDict(new_request[0])
-                input_requests[k] = new_request["self"]
+                del new_deskriptor["requires_deskriptor"]
+                # input_deskriptors[k] = NestedFrozenDict(new_deskriptor[0])
+                input_deskriptors[k] = new_deskriptor["self"]
 
             # all_deps = get_all_dependencies()
             clone_dependencies = [c for c in clone_dependencies if c is not None]
 
-            for clone_id, request in enumerate(clone_dependencies):
+            for clone_id, deskriptor in enumerate(clone_dependencies):
                 if clone:
                     to_clone_keys = dsk_dict[k][DATA]
                     if not isinstance(to_clone_keys, list):
@@ -372,7 +372,7 @@ def configuration(
                     # create new node in graph containing k_in_keys as input
                     if insert_predecessor:
                         pre_function = insert_predecessor[clone_id]
-                        pre_request = clone_dependencies[clone_id]
+                        pre_deskriptor = clone_dependencies[clone_id]
 
                         pre_k = tokenize([k, "deklare_pre", clone_id])
                         pre_base_name = None
@@ -382,11 +382,11 @@ def configuration(
                             pre_base_name = pre_function.__self__.dask_key_name
                             pre_k = pre_base_name + KEY_SEP + pre_k
 
-                        # # go trough request and update the name of the clone
+                        # # go trough deskriptor and update the name of the clone
                         # if pre_base_name is not None:
-                        #     update_key_in_config(pre_request,pre_base_name,pre_k)
+                        #     update_key_in_config(pre_deskriptor,pre_base_name,pre_k)
 
-                        requests[pre_k] = [pre_request]
+                        deskriptors[pre_k] = [pre_deskriptor]
                         dsk_dict[pre_k] = [apply, pre_function, [], {}]
                         pre_in_keys = []
 
@@ -427,7 +427,7 @@ def configuration(
                             for cd in clone_work:
                                 clone_d = generate_clone_key(k, cd, clone_id)
 
-                                # update_key_in_config(request,cd,clone_d)
+                                # update_key_in_config(deskriptor,cd,clone_d)
                                 # TODO: do we need to reset the dask_key_name of each
                                 #       of each cloned node?
 
@@ -462,40 +462,40 @@ def configuration(
                     # determine what needs to be removed
                     if not insert_predecessor:
                         # we are not going to remove anything if we inserted a predecessor node before current node k
-                        # we are also not updating the requests of dependencies of the original node k
+                        # we are also not updating the deskriptors of dependencies of the original node k
                         # since it will be done in the next interaction by configuring the inserted predecessor
 
                         to_be_removed = False
                         if k in remove:
                             to_be_removed = remove[k]
-                        if request is None:
+                        if deskriptor is None:
                             to_be_removed = True
-                        if "remove_dependencies" in request:
-                            to_be_removed = request["remove_dependencies"]
-                            del request["remove_dependencies"]
+                        if "remove_dependencies" in deskriptor:
+                            to_be_removed = deskriptor["remove_dependencies"]
+                            del deskriptor["remove_dependencies"]
 
                         # TODO: so far this doesn't allow to clone dependencies and delete only one of them.
                         #       it might be irrelevant.
-                        if request.get("remove_dependency", {}).get(
+                        if deskriptor.get("remove_dependency", {}).get(
                             base_name(d), False
                         ):
                             to_be_removed = True
-                            del request["remove_dependency"][base_name(d)]
+                            del deskriptor["remove_dependency"][base_name(d)]
 
-                        if not request.get("remove_dependency", True):
+                        if not deskriptor.get("remove_dependency", True):
                             # clean up if an empty dict still exists
-                            del request["remove_dependency"]
-                        if d in requests:
+                            del deskriptor["remove_dependency"]
+                        if d in deskriptors:
                             if clone_instead_merge:
                                 raise InternalError(
-                                    f"A duplicate request was found for {d} with the request {requests[d]}, set clone_instead_merge=False to allow this"
+                                    f"A duplicate deskriptor was found for {d} with the deskriptor {deskriptors[d]}, set clone_instead_merge=False to allow this"
                                 )
                             if not to_be_removed:
-                                requests[d] += [request]
+                                deskriptors[d] += [deskriptor]
                             remove[d] = remove[d] and to_be_removed
                         else:
                             if not to_be_removed:
-                                requests[d] = [request]
+                                deskriptors[d] = [deskriptor]
                             # if we received None
                             remove[d] = to_be_removed
 
@@ -530,54 +530,54 @@ def configuration(
     # Assembling the configured new graph
     out = {k: dsk_dict[k] for k in out_keys if not remove[k]}
 
-    def clean_request(x):
+    def clean_deskriptor(x):
         """Removes any leftovers of deklare configuration"""
         for item in ["remove_dependencies", "clone_dependencies", "insert_predecessor"]:
             x.pop(item, None)
 
         return x
 
-    # After we have acquired all requests we can input the required_requests as a input node to the requiring node
-    # we assume that the last argument is the request
-    for k in input_requests:
+    # After we have acquired all deskriptors we can input the required_deskriptors as a input node to the requiring node
+    # we assume that the last argument is the deskriptor
+    for k in input_deskriptors:
         if k not in out:
             continue
-        # input_requests[k] = clean_request(input_requests[k])
-        # Here we assume that we always receive the same tuple of (bound method, data, request)
+        # input_deskriptors[k] = clean_deskriptor(input_deskriptors[k])
+        # Here we assume that we always receive the same tuple of (bound method, data, deskriptor)
         # If the interface changes this will break #TODO: check for all cases
-        if isinstance(out[k][REQUEST], tuple):
+        if isinstance(out[k][DESKRIPTOR], tuple):
             # FIXME: find a better inversion of unpack_collections().
             #        this is very fragile
-            # Check if we've already got a request as argument
+            # Check if we've already got a deskriptor as argument
             # This is the case if our node will make use of a general config
-            # Then the present request is updated with the configured one
+            # Then the present deskriptor is updated with the configured one
             # We need to recreate the tuple/list elements though. (dask changed)
-            # TODO: use a distinct request class
-            if out[k][REQUEST][0] is dict:
+            # TODO: use a distinct deskriptor class
+            if out[k][DESKRIPTOR][0] is dict:
                 my_dict = {}
                 # FIXME: it does not account for nested structures
-                for item in out[k][REQUEST][1]:
+                for item in out[k][DESKRIPTOR][1]:
                     if isinstance(item[1], tuple):
                         if item[1][0] is tuple:
                             item[1] = tuple(item[1][1])
                         elif item[1][0] is list:
                             item[1] = list(item[1][1])
                     my_dict[item[0]] = item[1]
-                my_dict = {item[0]: item[1] for item in out[k][REQUEST][1]}
-                my_dict.update(input_requests[k])
-                out[k] = out[k][:REQUEST] + (my_dict,)
+                my_dict = {item[0]: item[1] for item in out[k][DESKRIPTOR][1]}
+                my_dict.update(input_deskriptors[k])
+                out[k] = out[k][:DESKRIPTOR] + (my_dict,)
             else:
                 # replace the last entry
-                out[k] = out[k][:REQUEST] + (input_requests[k],)
+                out[k] = out[k][:DESKRIPTOR] + (input_deskriptors[k],)
 
         # # TODO: verify that we can ignore this case
-        # elif isinstance(out[k][REQUEST], dict):
-        #     out[k] = out[k][:REQUEST] + (copy(out[k][REQUEST]) | copy(input_requests[k]),)
+        # elif isinstance(out[k][DESKRIPTOR], dict):
+        #     out[k] = out[k][:DESKRIPTOR] + (copy(out[k][DESKRIPTOR]) | copy(input_deskriptors[k]),)
         else:
             # replace the last entry
-            out[k] = out[k][:REQUEST] + (input_requests[k],)
+            out[k] = out[k][:DESKRIPTOR] + (input_deskriptors[k],)
 
-        # TODO: we might dask.delayed(out[k][REQUEST]) here
+        # TODO: we might dask.delayed(out[k][DESKRIPTOR]) here
 
     # convert to delayed object
     in_keys = list(flatten(keys))
@@ -799,8 +799,8 @@ def optimize(delayed, keys=None, dask_optimize=False):
     return collection
 
 
-def compute(graph, request):
-    configured_graph = configuration(graph, request)
+def compute(graph, deskriptor):
+    configured_graph = configuration(graph, deskriptor)
     # dsk, dsk_keys = dask.base._extract_graph_and_keys([configured_graph])
 
     computed_result = dask.compute(configured_graph)[0]

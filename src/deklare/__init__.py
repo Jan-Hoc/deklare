@@ -19,21 +19,27 @@ import inspect
 from .core import it, task
 from .graph import Node, compute
 from .persist import ChunkPersister, Persister
+from .deskribe import Deskriptor
 
 
-def deklare_flow(flow):
+def deklare_flow(flow, templateDeskriptor: Deskriptor = None):
     flow_graph = it(flow)
 
     def deklare_flow_function(self, deskriptor):
         return compute(flow_graph, deskriptor)
 
-    def query(self, deskriptor):
+    def query_class(self, deskriptor):
+        return query(deskriptor)
+
+    def query(deskriptor):
+        if templateDeskriptor:
+            deskriptor = templateDeskriptor.from_dict(deskriptor).to_dict()
         return compute(flow_graph, deskriptor)
 
     if hasattr(flow, "__self__") and flow.__self__ is not None:
-        flow.query = query
+        flow.query = query_class
     else:
-        flow.query = lambda deskriptor: compute(flow_graph, deskriptor)
+        flow.query = query
 
     return flow
 

@@ -109,100 +109,100 @@ class Node(object):
 
         self._name = None
 
-    def merge_config(self, request):
-        """Each request contains configuration which may apply to different
+    def merge_config(self, deskriptor):
+        """Each deskriptor contains configuration which may apply to different
         node instances. This function collects all information that apply to _this_
-        node (including it's preset configs) and adds a `self` keyword to the request.
+        node (including it's preset configs) and adds a `self` keyword to the deskriptor.
 
         Args:
-            request (dict): The request and configuration options.
+            deskriptor (dict): The deskriptor and configuration options.
 
         Returns:
-            dict: A new request which specific to this node.
+            dict: A new deskriptor which specific to this node.
         """
         protected_keys = ["self", "config"]
 
-        new_request = {}
-        new_request.update(request)
-        new_request["self"] = {}
+        new_deskriptor = {}
+        new_deskriptor.update(deskriptor)
+        new_deskriptor["self"] = {}
         if hasattr(self, "config"):
-            new_request["self"].update(deepcopy(self.config))
-        for key in request:
+            new_deskriptor["self"].update(deepcopy(self.config))
+        for key in deskriptor:
             # we consider any key that is not a protected key a global key
             if key not in protected_keys:
-                new_request["self"][key] = request[key]
+                new_deskriptor["self"][key] = deskriptor[key]
 
-        if "config" in request:
+        if "config" in deskriptor:
             PROTECTED_CONFIG_KEYS = ["global", "types", "keys"]
 
-            # new_request['config'] = {}
+            # new_deskriptor['config'] = {}
 
-            # We'll go through all parameters in the request's config
+            # We'll go through all parameters in the deskriptor's config
             # and add them to the self parameters
 
             # We assume that anything within 'config' is global
-            for key in request["config"]:
+            for key in deskriptor["config"]:
                 if key in PROTECTED_CONFIG_KEYS:
                     continue
-                new_request["self"][key] = request["config"][key]
+                new_deskriptor["self"][key] = deskriptor["config"][key]
 
-                # # add to new_request
-                # new_request['config'][key] = request["config"][key]
+                # # add to new_deskriptor
+                # new_deskriptor['config'][key] = deskriptor["config"][key]
 
             # add specific global config entries
-            if "global" in request["config"]:
-                for key in request["config"]["global"]:
-                    new_request["self"][key] = request["config"]["global"][key]
+            if "global" in deskriptor["config"]:
+                for key in deskriptor["config"]["global"]:
+                    new_deskriptor["self"][key] = deskriptor["config"]["global"][key]
 
-                # # add to new_request
-                # new_request['config']['global'] = request["config"]["global"]
+                # # add to new_deskriptor
+                # new_deskriptor['config']['global'] = deskriptor["config"]["global"]
 
             # add type specific configs (overwrites global config)
-            if "types" in request["config"]:
-                if type(self).__name__ in request["config"]["types"]:
+            if "types" in deskriptor["config"]:
+                if type(self).__name__ in deskriptor["config"]["types"]:
                     dict_update(
-                        new_request["self"],
-                        request["config"]["types"][type(self).__name__],
+                        new_deskriptor["self"],
+                        deskriptor["config"]["types"][type(self).__name__],
                     )
 
-                # # add to new_request
-                # new_request['config']['types'] = request["config"]["types"]
+                # # add to new_deskriptor
+                # new_deskriptor['config']['types'] = deskriptor["config"]["types"]
 
             # add key specific configs (overwrites global and type config)
-            if "keys" in request["config"]:
-                if self.dask_key_name in request["config"]["keys"]:
+            if "keys" in deskriptor["config"]:
+                if self.dask_key_name in deskriptor["config"]["keys"]:
                     dict_update(
-                        new_request["self"],
-                        request["config"]["keys"][self.dask_key_name],
+                        new_deskriptor["self"],
+                        deskriptor["config"]["keys"][self.dask_key_name],
                     )
 
-                    # TODO: It should be save to remove these keys from the new_request!?
-                    del new_request["config"]["keys"][self.dask_key_name]
+                    # TODO: It should be save to remove these keys from the new_deskriptor!?
+                    del new_deskriptor["config"]["keys"][self.dask_key_name]
 
                 # TODO: should we prefer the following way of removing the config?
-                # new_request['config']['keys'] = {k:v for k,v in request["config"]["keys"].items() if k != self.dask_key_name}
+                # new_deskriptor['config']['keys'] = {k:v for k,v in deskriptor["config"]["keys"].items() if k != self.dask_key_name}
 
-        if "config" in request:
-            new_request["config"] = request["config"]
-        return new_request
+        if "config" in deskriptor:
+            new_deskriptor["config"] = deskriptor["config"]
+        return new_deskriptor
 
-    def configure(self, request):
+    def configure(self, deskriptor):
         """Before a task graph is executed each node is configured.
-            The request is propagated from the end to the beginning
+            The deskriptor is propagated from the end to the beginning
             of the DAG and each nodes "configure" routine is called.
-            The request can be updated to reflect additional requirements,
+            The deskriptor can be updated to reflect additional requirements,
             The return value gets passed to predecessors.
 
             Essentially the following question must be answered within the
             nodes configure function:
-            What do I need to fulfil the request of my successor? Either the node
-            can provide what is required or the request is passed through to
-            predecessors in hope they can fulfil the request.
+            What do I need to fulfil the deskriptor of my successor? Either the node
+            can provide what is required or the deskriptor is passed through to
+            predecessors in hope they can fulfil the deskriptor.
 
             Here, you must not configure the internal parameters of the
             Node otherwise it would not be thread-safe. You can however
-            introduce a new key 'requires_request' in the request being
-            returned. This request will then be passed as an argument
+            introduce a new key 'requires_deskriptor' in the deskriptor being
+            returned. This deskriptor will then be passed as an argument
             to the __call__ function.
 
             Best practice is to configure the Node on initialization with
@@ -210,25 +210,25 @@ class Node(object):
             dependant configurations here.
 
         Args:
-            requests {List} -- List of requests (i.e. dictionaries).
+            deskriptors {List} -- List of deskriptors (i.e. dictionaries).
 
 
         Returns:
-            dict -- The (updated) request. If updated, modifications
+            dict -- The (updated) deskriptor. If updated, modifications
                     must be made on a copy of the input. The return value
                     must be a dictionary.
-                    If multiple requests are input to this function they
+                    If multiple deskriptors are input to this function they
                     must be merged.
-                    If nothing needs to be requested an empty dictionary
+                    If nothing needs to be deskriptored an empty dictionary
                     can be return. This removes all dependencies of this
                     node from the task graph.
 
         """
-        merged_request = self.merge_config(request)
+        merged_deskriptor = self.merge_config(deskriptor)
 
         # set default
-        merged_request["requires_request"] = True
-        return merged_request
+        merged_deskriptor["requires_deskriptor"] = True
+        return merged_deskriptor
 
     def __call__(self, *args, **kwargs):
         name = kwargs.get("name", None)
@@ -239,12 +239,12 @@ class Node(object):
             name = self._name
 
         new_kwargs = copy(kwargs)
-        if kwargs.get("request", None) is not None:
-            new_kwargs["request"] = self.merge_config(kwargs["request"])
+        if kwargs.get("deskriptor", None) is not None:
+            new_kwargs["deskriptor"] = self.merge_config(kwargs["deskriptor"])
         elif kwargs.get("deskriptor", None) is not None:
             new_kwargs["deskriptor"] = self.merge_config(kwargs["deskriptor"])
         else:
-            new_kwargs["request"] = self.merge_config({})
+            new_kwargs["deskriptor"] = self.merge_config({})
 
         if context is None:
             context = FlowContext
@@ -253,7 +253,7 @@ class Node(object):
 
         if context.is_enabled():
             func = dask.delayed(forward_func)(*args, dask_key_name=name, **kwargs)
-            # func = dask.delayed(forward_func)(data=None, request=None,
+            # func = dask.delayed(forward_func)(data=None, deskriptor=None,
             #     dask_key_name=name
             # )
             self.dask_key_name = func.key
@@ -293,9 +293,9 @@ def task(name=None, context=None):
             if "configure" in cls.__dict__:
                 original_inherit_method = cls.__dict__["configure"]
 
-                def new_configure(self, request):
-                    request = Node.configure(self, request)
-                    return original_inherit_method(self, request)
+                def new_configure(self, deskriptor):
+                    deskriptor = Node.configure(self, deskriptor)
+                    return original_inherit_method(self, deskriptor)
 
                 setattr(DeklareClass, "configure", new_configure)
 
