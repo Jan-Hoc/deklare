@@ -220,6 +220,9 @@ class Persister:
                 deskriptor["self"]["action"] = "load_from_cache"
                 return deskriptor
 
+            if self.store is None:
+                return deskriptor
+            
             # while holding the mutex, we need to check if the file exists
             if data_path in self.store:
                 # remove previous node since we are going to load from disk
@@ -244,17 +247,15 @@ class Persister:
         return deskriptor
 
     def compute(self, data: T | None = None, **deskriptor):
-        self.store.dirfs.mkdirs("data/", exist_ok=True)
-        data_path = f"data/{deskriptor['deskriptor_hash']}"
+        if self.store is not None:
+            self.store.dirfs.mkdirs("data/", exist_ok=True)
+            data_path = f"data/{deskriptor['deskriptor_hash']}"
 
         if deskriptor["action"] == "load_from_cache":
             with self._mutex:
                 cached = self.cache[data_path]
             return cached
         elif deskriptor["action"] == "load":
-            # buffer = io.BytesIO(self.store[data_path])
-            # data = self.storage_manager.read_buffer(buffer)
-
             f = self.store.dirfs.open(data_path)
             data = self.storage_manager.read(f)
 
@@ -263,6 +264,12 @@ class Persister:
 
             return data
         elif deskriptor["action"] == "store":
+            with self._mutex:
+                self.cache[data_path] = data
+
+            if self.store is None:
+                return data 
+            
             try:
                 # in this case we assume that the second element is additional metadata for the STAC item
                 if (
@@ -274,8 +281,6 @@ class Persister:
                     data = data[0]
                 else:
                     item_metadata = {}
-
-                self.cache[data_path] = data
 
                 # write to file
                 if isinstance(data, NodeFailedException):
@@ -306,8 +311,6 @@ class Persister:
             except Exception as e:
                 print("Error during Persister", repr(e))
 
-            with self._mutex:
-                self.cache[data_path] = data
 
             return data
         elif deskriptor["action"] == "passthrough":
