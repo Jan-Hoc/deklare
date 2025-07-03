@@ -468,12 +468,12 @@ class Persister:
         # save in collection and avoid concurrency issues
         with self._global_lock:
             collection = pystac.Collection.from_file(
-                "stac/collection.json", self.stac_io
+                "/stac/collection.json", self.stac_io
             )  # pretending location is absolute to stop stac from changing path
             collection.add_item(item)
             collection.save(
                 catalog_type=pystac.CatalogType.SELF_CONTAINED,
-                dest_href="stac",  # pretend path is absolute so pystac doesnt try and change it
+                dest_href="/stac",  # pretend path is absolute so pystac doesnt try and change it
                 stac_io=self.stac_io,
             )
 
@@ -600,7 +600,7 @@ class ChunkPersister:
             # create collection if doesn't exist
             try:
                 collection = pystac.Collection.from_file(
-                    "stac/collection.json", self.stac_io
+                    "/stac/collection.json", self.stac_io
                 )
             except:
                 collection_metadata = ChunkPersister._process_collection_metadata(
@@ -612,7 +612,7 @@ class ChunkPersister:
                     collection.add_link(l)
 
                 collection.normalize_and_save(
-                    root_href="stac",  # pretend path is absolute so pystac doesnt try and change it
+                    root_href="/stac",  # pretend path is absolute so pystac doesnt try and change it
                     catalog_type=pystac.CatalogType.SELF_CONTAINED,
                     stac_io=self.stac_io,
                 )
@@ -716,12 +716,12 @@ class ChunkPersister:
             # update extents
             with self.mutex:
                 collection = pystac.Collection.from_file(
-                    "stac/collection.json", self.stac_io
+                    "/stac/collection.json", self.stac_io
                 )  # pretend path is absolute so pystac doesnt try and change it
                 collection.update_extent_from_items()
                 collection.save(
                     catalog_type=pystac.CatalogType.SELF_CONTAINED,
-                    dest_href="stac",  # pretend path is absolute so pystac doesnt try and change it
+                    dest_href="/stac",  # pretend path is absolute so pystac doesnt try and change it
                     stac_io=self.stac_io,
                 )
 
