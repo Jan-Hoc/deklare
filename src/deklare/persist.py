@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License."""
 
 import io
-import os
 import json
 import warnings
 from copy import copy, deepcopy
@@ -23,7 +22,6 @@ from threading import Lock
 from typing import Callable, TypeVar, Generic
 from abc import ABC, abstractmethod
 
-import math
 import pandas as pd
 from cachetools import LRUCache
 from compress_pickle import dump, load
@@ -61,6 +59,8 @@ class StacIO(pystac.StacIO):
             str: The text contained in the file at the location specified by the uri.
         """
         str_src = str(source)
+        if str_src.startswith('/') and len(str_src) > 1:
+            str_src = str_src[1:]
         return self.store[str_src].decode()
 
     def write_text(self, dest: pystac.utils.HREF, txt: str, *args, **kwargs) -> None:
@@ -71,6 +71,9 @@ class StacIO(pystac.StacIO):
             txt : The text to write.
         """
         str_dest = str(dest)
+        if str_dest.startswith('/') and len(str_dest) > 1:
+            str_dest = str_dest[1:]
+
         self.store[str_dest] = txt.encode()
 
     def gen_stac_item_kwargs(self, deskriptor: dict, item_metadata: dict) -> dict:
