@@ -173,6 +173,7 @@ class Persister:
         selected_keys=None,
         force_update=False,
         use_memorycache=True,
+        cache=None,
         global_lock=None,
         save_metadata=False,
     ):
@@ -181,7 +182,11 @@ class Persister:
             store = fsspec.get_mapper(store)
         self.store = store
         self.storage_manager = storage_manager
-        self.cache = LRUCache(10)
+
+        if cache is None:
+            cache = LRUCache(10)
+        self.cache = cache
+
         if selected_keys is None:
             # use all keys as hash
             pass
@@ -213,7 +218,7 @@ class Persister:
         with self._mutex:
             if (
                 deskriptor["self"].get("use_memorycache", True)
-                and deskriptor_hash in self.cache
+                and data_path in self.cache
             ):
                 deskriptor["remove_dependencies"] = True
                 # set the compute action to load
@@ -508,6 +513,8 @@ class ChunkPersister:
         storage_manager: StorageManager = PickleStorageManager(),
         collection_metadata: dict = {},
         save_metadata=False,
+        use_memorycache=True,
+        cache = None
     ):
         """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
@@ -529,6 +536,11 @@ class ChunkPersister:
         #     classification_scope = None
         # else:
         #     self.classification_scope = None
+
+        self.use_memorycache = use_memorycache
+        if cache is None:
+            cache = LRUCache(10)
+        self.cache = cache
 
         if callable(segment_slice):
             self.segment_slice = segment_slice
@@ -650,6 +662,8 @@ class ChunkPersister:
                 stac_io=self.stac_io,
                 global_lock=self.mutex,
                 save_metadata=self.save_metadata,
+                cache = self.cache,
+                use_memorycache=self.use_memorycache
             )
             cloned_persister.dask_key_name = self.dask_key_name + "_persister"
             dict_update(
