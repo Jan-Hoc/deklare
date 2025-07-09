@@ -132,7 +132,7 @@ class Node(object):
             if key not in protected_keys:
                 new_deskriptor["self"][key] = deskriptor[key]
 
-        if "config" in deskriptor:
+        if deskriptor.get("config", None) is not None:
             PROTECTED_CONFIG_KEYS = ["global", "types", "keys"]
 
             # new_deskriptor['config'] = {}
@@ -280,32 +280,45 @@ def task(name=None, context=None):
         if inspect.isclass(func_or_cls):
             cls = func_or_cls
 
-            if cls.__name__ == "DeklareClass":
+            if cls.__name__ == "DeklareClass": # Keep this check if "DeklareClass" is still a sentinel
                 # don't wrap it twice!
                 return cls
 
-            class DeklareClass(cls, Node):
-                def __init__(self, *args, **kwargs):
-                    super().__init__(*args, **kwargs)
-                    self._name = name
+            # Create a new class dynamically with the original class's name
+            # The new class inherits from the original cls and Node
+            new_cls_name = cls.__name__
+            bases = (cls, Node)
+            new_cls_dict = {}
+
+            # Define __init__ for the new class
+            def __init__(self, *args, **kwargs):
+                super(type(self), self).__init__(*args, **kwargs)
+                self._name = getattr(self, '_name', None) or name
+
+            new_cls_dict['__init__'] = __init__
+
+            # Dynamically create the new class
+            NewWrappedClass = type(new_cls_name, bases, new_cls_dict)
 
             # Check if the original class defines configure
             if "configure" in cls.__dict__:
                 original_inherit_method = cls.__dict__["configure"]
 
                 def new_configure(self, deskriptor):
+                    # Ensure Node.configure is called correctly
                     deskriptor = Node.configure(self, deskriptor)
                     return original_inherit_method(self, deskriptor)
 
-                setattr(DeklareClass, "configure", new_configure)
+                setattr(NewWrappedClass, "configure", new_configure)
 
             # Rename cls's __call__ method to compute
             if "__call__" in cls.__dict__:
-                setattr(DeklareClass, "compute", cls.__dict__["__call__"])
-                # Use Node's __call__ method as NewClass's __call__ method
-                setattr(DeklareClass, "__call__", Node.__call__)
+                # Directly set 'compute' to the original __call__ method
+                setattr(NewWrappedClass, "compute", cls.__dict__["__call__"])
+                # Use Node's __call__ method as NewWrappedClass's __call__ method
+                setattr(NewWrappedClass, "__call__", Node.__call__)
 
-            return DeklareClass
+            return NewWrappedClass
         else:
             func = func_or_cls
 

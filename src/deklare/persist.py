@@ -173,6 +173,7 @@ class Persister:
         selected_keys=None,
         force_update=False,
         use_memorycache=True,
+        cache=None,
         global_lock=None,
         save_metadata=False,
     ):
@@ -181,7 +182,11 @@ class Persister:
             store = fsspec.get_mapper(store)
         self.store = store
         self.storage_manager = storage_manager
-        self.cache = LRUCache(10)
+
+        if cache is None:
+            cache = LRUCache(10)
+        self.cache = cache
+
         if selected_keys is None:
             # use all keys as hash
             pass
@@ -213,13 +218,16 @@ class Persister:
         with self._mutex:
             if (
                 deskriptor["self"].get("use_memorycache", True)
-                and deskriptor_hash in self.cache
+                and data_path in self.cache
             ):
                 deskriptor["remove_dependencies"] = True
                 # set the compute action to load
                 deskriptor["self"]["action"] = "load_from_cache"
                 return deskriptor
 
+            if self.store is None:
+                return deskriptor
+            
             # while holding the mutex, we need to check if the file exists
             if data_path in self.store:
                 # remove previous node since we are going to load from disk
@@ -244,17 +252,18 @@ class Persister:
         return deskriptor
 
     def compute(self, data: T | None = None, **deskriptor):
-        self.store.dirfs.mkdirs("data/", exist_ok=True)
-        data_path = f"data/{deskriptor['deskriptor_hash']}"
+        if deskriptor["action"] == "passthrough":
+            return data
+    
+        if self.store is not None:
+            self.store.dirfs.mkdirs("data/", exist_ok=True)
+            data_path = f"data/{deskriptor['deskriptor_hash']}"
 
         if deskriptor["action"] == "load_from_cache":
             with self._mutex:
                 cached = self.cache[data_path]
             return cached
         elif deskriptor["action"] == "load":
-            # buffer = io.BytesIO(self.store[data_path])
-            # data = self.storage_manager.read_buffer(buffer)
-
             f = self.store.dirfs.open(data_path)
             data = self.storage_manager.read(f)
 
@@ -263,6 +272,12 @@ class Persister:
 
             return data
         elif deskriptor["action"] == "store":
+            with self._mutex:
+                self.cache[data_path] = data
+
+            if self.store is None:
+                return data 
+            
             try:
                 # in this case we assume that the second element is additional metadata for the STAC item
                 if (
@@ -274,8 +289,6 @@ class Persister:
                     data = data[0]
                 else:
                     item_metadata = {}
-
-                self.cache[data_path] = data
 
                 # write to file
                 if isinstance(data, NodeFailedException):
@@ -306,11 +319,7 @@ class Persister:
             except Exception as e:
                 print("Error during Persister", repr(e))
 
-            with self._mutex:
-                self.cache[data_path] = data
 
-            return data
-        elif deskriptor["action"] == "passthrough":
             return data
         else:
             raise NodeFailedException("A bug in Persister. Please report.")
@@ -469,16 +478,19 @@ except ImportError:
 
 def merge_xarray(data, deskriptor):
     data = [d for d in data if d is not None]
-    for i in range(len(data)):
-        if hasattr(data[i], "name") and (not data[i].name or data[i].name is None):
-            data[i].name = "data"
-    # merged_dataset = xr.merge(data)
-    merged_dataset = xr.concat(data, dim="time")
+    if len(data) == 1:
+        merged_dataset = data[0]
+    else:
+        for i in range(len(data)):
+            if hasattr(data[i], "name") and (not data[i].name or data[i].name is None):
+                data[i].name = "data"
+# merged_dataset = xr.merge(data)
+        merged_dataset = xr.concat(data, dim="time")
 
     # if hasattr(data[0], "name"):
     #     merged_dataset = merged_dataset[data[0].name]
     indexers = {}
-    for coord in merged_dataset.coords:
+    for coord in merged_dataset.indexes:
         if coord in deskriptor:
             indexers[coord] = deskriptor[coord]
     slices = indexers_to_slices(indexers)
@@ -505,6 +517,8 @@ class ChunkPersister:
         storage_manager: StorageManager = PickleStorageManager(),
         collection_metadata: dict = {},
         save_metadata=False,
+        use_memorycache=True,
+        cache = None
     ):
         """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
@@ -526,6 +540,11 @@ class ChunkPersister:
         #     classification_scope = None
         # else:
         #     self.classification_scope = None
+
+        self.use_memorycache = use_memorycache
+        if cache is None:
+            cache = LRUCache(10)
+        self.cache = cache
 
         if callable(segment_slice):
             self.segment_slice = segment_slice
@@ -600,7 +619,9 @@ class ChunkPersister:
 
     def configure(self, deskriptor=None):
         rs = deskriptor["self"]
-
+        if rs.get("bypass",False):
+            return deskriptor 
+        
         def get_value(attr_name):
             # decide if we use the attribute provided in the deskriptor or
             # from a callback provided at initialization
@@ -647,6 +668,8 @@ class ChunkPersister:
                 stac_io=self.stac_io,
                 global_lock=self.mutex,
                 save_metadata=self.save_metadata,
+                cache = self.cache,
+                use_memorycache=self.use_memorycache
             )
             cloned_persister.dask_key_name = self.dask_key_name + "_persister"
             dict_update(
