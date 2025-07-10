@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License."""
 
 import io
-import os
 import json
 import warnings
 from copy import copy, deepcopy
@@ -23,7 +22,6 @@ from threading import Lock
 from typing import Callable, TypeVar, Generic
 from abc import ABC, abstractmethod
 
-import math
 import pandas as pd
 from cachetools import LRUCache
 from compress_pickle import dump, load
@@ -61,6 +59,8 @@ class StacIO(pystac.StacIO):
             str: The text contained in the file at the location specified by the uri.
         """
         str_src = str(source)
+        if str_src.startswith('/') and len(str_src) > 1:
+            str_src = str_src[1:]
         return self.store[str_src].decode()
 
     def write_text(self, dest: pystac.utils.HREF, txt: str, *args, **kwargs) -> None:
@@ -71,8 +71,101 @@ class StacIO(pystac.StacIO):
             txt : The text to write.
         """
         str_dest = str(dest)
+        if str_dest.startswith('/') and len(str_dest) > 1:
+            str_dest = str_dest[1:]
+
         self.store[str_dest] = txt.encode()
 
+    def gen_stac_item_kwargs(self, deskriptor: dict, item_metadata: dict) -> dict:
+        """generates metadata for the stac item for a deskriptor
+
+        Args:
+            deskriptor (dict): deskriptor describing
+            item_metadata (dict): _description_
+
+        Raises:
+            RuntimeError: _description_
+
+        Returns:
+            dict: _description_
+        """
+        if (
+            "longitude" not in deskriptor or
+            "start" not in deskriptor["longitude"] or
+            "end" not in deskriptor["longitude"] or
+            "latitude" not in deskriptor or
+            "start" not in deskriptor["latitude"] or
+            "end" not in deskriptor["latitude"] or
+            "time" not in deskriptor or
+            "variable" not in deskriptor
+        ):
+            raise RuntimeError("Given deskriptor does not match required metadata format")
+
+        id = deskriptor["deskriptor_hash"]
+        bbox = [
+            deskriptor["longitude"]["start"],
+            deskriptor["latitude"]["end"],
+            deskriptor["longitude"]["end"],
+            deskriptor["latitude"]["start"],
+        ]
+        footprint = mapping(
+            Polygon(
+                [
+                    [bbox[0], bbox[1]],  # lower left corner
+                    [bbox[0], bbox[3]],  # upper left corner
+                    [bbox[2], bbox[3]],  # upper right corner
+                    [bbox[2], bbox[1]],  # lower right corner
+                    [bbox[0], bbox[1]],  # lower left corner
+                ]
+            )
+        )
+        start_time = deskriptor["time"]["start"].to_pydatetime()
+        end_time = deskriptor["time"]["end"].to_pydatetime()
+        variables = deskriptor["variable"]
+
+        kwargs = {
+            "id": id,
+            "geometry": footprint,
+            "bbox": bbox,
+            "datetime": None,
+            "start_datetime": start_time,
+            "end_datetime": end_time,
+            "properties": {
+                "description": self._gen_description(deskriptor),
+                "variables": variables,
+            },
+        }
+
+        blocked_keys = kwargs.keys()
+        for k, v in item_metadata.items():
+            if k not in blocked_keys:
+                kwargs[k] = v
+            elif k == "properties" and isinstance(v, dict):
+                for k_p, v_p in v.items():
+                    if k_p != "variables":
+                        kwargs[k][k_p] = v_p
+
+        return kwargs
+
+    def _gen_description(self, deskriptor) -> str:
+        """generate human readable description for STAC Item of chunk
+
+        Returns:
+            str: STAC Item description
+        """
+        start_time = deskriptor["time"]["start"].isoformat()
+        end_time = deskriptor["time"]["end"].isoformat()
+        variable_string = ", ".join(deskriptor["variable"])
+        latitude_string = f"{deskriptor['latitude']['start']} to {deskriptor['latitude']['end']} latitude"
+        longitude_string = f"{deskriptor['longitude']['start']} to {deskriptor['longitude']['end']} longitude"
+
+        description = (
+            f"This chunk contains data for the variable(s) {variable_string}, "
+            f"collected from {start_time} to {end_time}, "
+            f"covering the geographic region defined by {latitude_string} and {longitude_string}"
+        )
+
+        return description
 
 T = TypeVar("T")
 
@@ -370,7 +463,7 @@ class Persister:
             item_metadata(dict): additional metadata passed by loader to save in STAC item
         """
 
-        kwargs = Persister._gen_item_kwargs(deskriptor, item_metadata)
+        kwargs = self.stac_io.gen_stac_item_kwargs(deskriptor, item_metadata)
 
         item = pystac.Item(**kwargs)
 
@@ -387,81 +480,14 @@ class Persister:
         # save in collection and avoid concurrency issues
         with self._global_lock:
             collection = pystac.Collection.from_file(
-                "stac/collection.json", self.stac_io
+                "/stac/collection.json", self.stac_io
             )  # pretending location is absolute to stop stac from changing path
             collection.add_item(item)
             collection.save(
                 catalog_type=pystac.CatalogType.SELF_CONTAINED,
-                dest_href="stac",  # pretend path is absolute so pystac doesnt try and change it
+                dest_href="/stac",  # pretend path is absolute so pystac doesnt try and change it
                 stac_io=self.stac_io,
             )
-
-    def _gen_description(deskriptor) -> str:
-        """generate human readable description for STAC Item of chunk
-
-        Returns:
-            str: STAC Item description
-        """
-        start_time = deskriptor["time"]["start"].isoformat()
-        end_time = deskriptor["time"]["end"].isoformat()
-        variable_string = ", ".join(deskriptor["variable"])
-        latitude_string = f"{deskriptor['latitude']['start']} to {deskriptor['latitude']['end']} latitude"
-        longitude_string = f"{deskriptor['longitude']['start']} to {deskriptor['longitude']['end']} longitude"
-
-        description = (
-            f"This chunk contains data for the variable(s) {variable_string}, "
-            f"collected from {start_time} to {end_time}, "
-            f"covering the geographic region defined by {latitude_string} and {longitude_string}"
-        )
-
-        return description
-
-    def _gen_item_kwargs(deskriptor: dict, item_metadata: dict) -> dict:
-        id = deskriptor["deskriptor_hash"]
-        bbox = [
-            deskriptor["longitude"]["start"],
-            deskriptor["latitude"]["end"],
-            deskriptor["longitude"]["end"],
-            deskriptor["latitude"]["start"],
-        ]
-        footprint = mapping(
-            Polygon(
-                [
-                    [bbox[0], bbox[1]],  # lower left corner
-                    [bbox[0], bbox[3]],  # upper left corner
-                    [bbox[2], bbox[3]],  # upper right corner
-                    [bbox[2], bbox[1]],  # lower right corner
-                    [bbox[0], bbox[1]],  # lower left corner
-                ]
-            )
-        )
-        start_time = deskriptor["time"]["start"].to_pydatetime()
-        end_time = deskriptor["time"]["end"].to_pydatetime()
-        variables = deskriptor["variable"]
-
-        kwargs = {
-            "id": id,
-            "geometry": footprint,
-            "bbox": bbox,
-            "datetime": None,
-            "start_datetime": start_time,
-            "end_datetime": end_time,
-            "properties": {
-                "description": Persister._gen_description(deskriptor),
-                "variables": variables,
-            },
-        }
-
-        blocked_keys = kwargs.keys()
-        for k, v in item_metadata.items():
-            if k not in blocked_keys:
-                kwargs[k] = v
-            elif k == "properties" and isinstance(v, dict):
-                for k_p, v_p in v.items():
-                    if k_p != "variables":
-                        kwargs[k][k_p] = v_p
-
-        return kwargs
 
     def _string_timestamp(o):
         if hasattr(o, "isoformat"):
@@ -484,8 +510,9 @@ def merge_xarray(data, deskriptor):
         for i in range(len(data)):
             if hasattr(data[i], "name") and (not data[i].name or data[i].name is None):
                 data[i].name = "data"
-# merged_dataset = xr.merge(data)
         merged_dataset = xr.concat(data, dim="time")
+        if not merged_dataset.time.to_index().is_monotonic_increasing:
+            merged_dataset = merged_dataset.sortby("time")
 
     # if hasattr(data[0], "name"):
     #     merged_dataset = merged_dataset[data[0].name]
@@ -594,7 +621,7 @@ class ChunkPersister:
             # create collection if doesn't exist
             try:
                 collection = pystac.Collection.from_file(
-                    "stac/collection.json", self.stac_io
+                    "/stac/collection.json", self.stac_io
                 )
             except:
                 collection_metadata = ChunkPersister._process_collection_metadata(
@@ -606,7 +633,7 @@ class ChunkPersister:
                     collection.add_link(l)
 
                 collection.normalize_and_save(
-                    root_href="stac",  # pretend path is absolute so pystac doesnt try and change it
+                    root_href="/stac",  # pretend path is absolute so pystac doesnt try and change it
                     catalog_type=pystac.CatalogType.SELF_CONTAINED,
                     stac_io=self.stac_io,
                 )
@@ -714,12 +741,12 @@ class ChunkPersister:
             # update extents
             with self.mutex:
                 collection = pystac.Collection.from_file(
-                    "stac/collection.json", self.stac_io
+                    "/stac/collection.json", self.stac_io
                 )  # pretend path is absolute so pystac doesnt try and change it
                 collection.update_extent_from_items()
                 collection.save(
                     catalog_type=pystac.CatalogType.SELF_CONTAINED,
-                    dest_href="stac",  # pretend path is absolute so pystac doesnt try and change it
+                    dest_href="/stac",  # pretend path is absolute so pystac doesnt try and change it
                     stac_io=self.stac_io,
                 )
 
