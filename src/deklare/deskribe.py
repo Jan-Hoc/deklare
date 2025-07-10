@@ -17,7 +17,7 @@ import datetime
 from typing import Annotated, Any, Dict, Generic, TypeVar, get_args
 
 import pandas as pd
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, model_validator, Field
 from pydantic.functional_validators import AfterValidator
 
 
@@ -66,8 +66,15 @@ def transform_to_nested(input: dict, split: str = ".") -> dict:
         current[parts[-1]] = value
     return transformed
 
+# class DeskriptorConfig(BaseModel):
+#     global: 
+#     types:
+#     keys:
 
 class Deskriptor(BaseModel, validate_assignment=True):
+    config: Dict | None = None
+    # deskriptor_config: Dict | None = Field(alias='config')
+
     @model_validator(mode="before")
     def dynamic_validator(cls, values: dict[str, Any]) -> dict[str, Any]:
         kwargs = {}
