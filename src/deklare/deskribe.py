@@ -96,10 +96,12 @@ class Deskriptor(BaseModel, validate_assignment=True):
                     kwargs[key] = value
         return kwargs
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, remove_none=True) -> Dict[str, Any]:
         result = {}
         for field_name, field_value in self:
-            if isinstance(field_value, (DatetimeRange, Range)):
+            if remove_none and field_value is None:
+                continue
+            elif isinstance(field_value, (DatetimeRange, Range)):
                 result[field_name] = dict(field_value)
             else:
                 result[field_name] = field_value
