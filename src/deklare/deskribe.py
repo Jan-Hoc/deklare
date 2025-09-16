@@ -13,52 +13,48 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License."""
 
+from __future__ import annotations
+
 import datetime
 from typing import Annotated, Any, Dict, Generic, TypeVar, get_args
 
+import numpy as np
 import pandas as pd
-from pydantic import BaseModel, model_validator, Field
+from pandas.core.tools.datetimes import DatetimeScalar
+from pydantic import BaseModel, model_validator
 from pydantic.functional_validators import AfterValidator
 
+# ToDo: Doc strings
+# ToDo: more precise types
 
-def to_datetime(v: Any) -> Any:
+
+def to_datetime(v: DatetimeScalar) -> pd.Timestamp:
     return pd.to_datetime(v, utc=True).tz_localize(None)
 
 
-try:
-    import numpy as np
+T = TypeVar("T", str, datetime.datetime, datetime.date, int, float, np.datetime64)
 
-    T = TypeVar(
-        "T", str, datetime.datetime, datetime.date, int, float, type(np.datetime64)
-    )
-except:
-    T = TypeVar("T", str, datetime.datetime, datetime.date, int, float)
 
 DateTimeType = Annotated[T, AfterValidator(to_datetime)]
-
-
-# class DatetimeRange(BaseModel):
-#     start: DateTimeType
-#     end: DateTimeType
 
 
 T = TypeVar("T", int, float, DateTimeType)
 
 
 class Range(BaseModel, Generic[T]):
-    start: T
-    end: T
+    start: T  # type: ignore
+    end: T  # type: ignore
 
 
 DatetimeRange = Range[DateTimeType]
 
 
-def transform_to_nested(input: dict, split: str = ".") -> dict:
+def transform_to_nested(input_dict: dict, split: str = ".") -> dict:
     """
     Transform the flat JSON keys with dots (split) into nested JSON keys.
     """
     transformed = {}
-    for key, value in input.items():
+    for key, value in input_dict.items():
         parts = key.split(split)
         current = transformed
         for part in parts[:-1]:
@@ -67,16 +63,10 @@ def transform_to_nested(input: dict, split: str = ".") -> dict:
     return transformed
 
 
-# class DeskriptorConfig(BaseModel):
-#     global:
-#     types:
-#     keys:
-
-
 class Deskriptor(BaseModel, validate_assignment=True):
-    config: Dict | None = None
-    # deskriptor_config: Dict | None = Field(alias='config')
+    config: dict[str, Any] = {}
 
+    @classmethod
     @model_validator(mode="before")
     def dynamic_validator(cls, values: dict[str, Any]) -> dict[str, Any]:
         kwargs = {}
@@ -86,13 +76,9 @@ class Deskriptor(BaseModel, validate_assignment=True):
         for key, value in values.items():
             if key in cls.model_fields:
                 field_info = cls.model_fields[key]
-                if DatetimeRange in get_args(field_info.annotation) and isinstance(
-                    value, dict
-                ):
+                if DatetimeRange in get_args(field_info.annotation) and isinstance(value, dict):
                     kwargs[key] = DatetimeRange(**value)
-                elif Range in get_args(field_info.annotation) and isinstance(
-                    value, dict
-                ):
+                elif Range in get_args(field_info.annotation) and isinstance(value, dict):
                     kwargs[key] = Range(**value)
                 else:
                     kwargs[key] = value
@@ -109,8 +95,14 @@ class Deskriptor(BaseModel, validate_assignment=True):
                 result[field_name] = field_value
         return result
 
+    def update(self, deskriptor: Deskriptor) -> None:
+        self.config.update(deskriptor.config)
+
+    def get(self, key: str, default: Any) -> Any:  # noqa: ANN401
+        return self.config.get(key, default)
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
+    def from_dict(cls, data: Dict[str, Any]) -> Deskriptor:
         kwargs = {}
 
         data = transform_to_nested(data)
@@ -118,13 +110,9 @@ class Deskriptor(BaseModel, validate_assignment=True):
         for key, value in data.items():
             if key in cls.model_fields:
                 field_info = cls.model_fields[key]
-                if DatetimeRange in get_args(field_info.annotation) and isinstance(
-                    value, dict
-                ):
+                if DatetimeRange in get_args(field_info.annotation) and isinstance(value, dict):
                     kwargs[key] = DatetimeRange(**value)
-                elif Range in get_args(field_info.annotation) and isinstance(
-                    value, dict
-                ):
+                elif Range in get_args(field_info.annotation) and isinstance(value, dict):
                     kwargs[key] = Range(**value)
                 else:
                     kwargs[key] = value

@@ -18,11 +18,15 @@ import inspect
 import yaml
 import os
 from pathlib import Path
+from typing import Callable
 
-from .core import it, task
+from .core import init_flow_graph, task
+from .deskribe import Deskriptor
 from .graph import Node, compute
 from .persist import ChunkPersister, Persister
-from .deskribe import Deskriptor
+
+# ToDo: Doc strings
+# ToDo: more precise types
 
 
 def deklare_flow(
@@ -30,7 +34,7 @@ def deklare_flow(
     template_deskriptor: Deskriptor | None = None,
     config_path: Path | str | None = None,
 ):
-    flow_graph = it(flow)
+    flow_graph = init_flow_graph(flow)
 
     config_deskriptor = None
     if config_path is not None:
@@ -48,9 +52,7 @@ def deklare_flow(
 
     def query(deskriptor):
         if config_deskriptor:
-            deskriptor = Deskriptor.update_from_config_dict(
-                deskriptor, config_deskriptor
-            )
+            deskriptor = Deskriptor.update_from_config_dict(deskriptor, config_deskriptor)
 
         if template_deskriptor:
             deskriptor = template_deskriptor.from_dict(deskriptor).to_dict()
@@ -64,8 +66,8 @@ def deklare_flow(
     return flow
 
 
-def is_module_function_or_class(module):
-    def predicate(member):
+def is_module_function_or_class(_module: importlib.ModuleType) -> Callable:
+    def predicate(member: object) -> bool:
         # TODO: should we also check for member.__name__ in module.__name__?
         return inspect.isfunction(member) or inspect.isclass(member)
 
@@ -73,8 +75,13 @@ def is_module_function_or_class(module):
 
 
 def deklare_module(
-    module, flows=None, names=None, external_tasks=None, ignore=None, no_wrap=False
-):
+    module: str | importlib.ModuleType,
+    flows: str | set | None = None,
+    names: dict | None = None,
+    external_tasks: list | None = None,
+    ignore: list | None = None,
+    no_wrap: bool = False,
+) -> tuple:
     names = names or {}
     external_tasks = external_tasks or []
     ignore = ignore or []
@@ -89,16 +96,31 @@ def deklare_module(
         # Dynamically import the module
         module = importlib.import_module(module)
 
-    # Create a dictionary to store original functions that should not be decorated
-    flow_instances = {}
+    flow_instances, dependency_modules = _init_modules(module, flows, ignore, names, external_tasks)
 
-    # dependencies
-    dependency_modules = {}
+    for dependency_module, dependency_flows in dependency_modules.items():
+        dependency_flows_names = list(dependency_flows.keys())
+        module_and_flows = deklare_module(dependency_module, flows=dependency_flows_names, no_wrap=True)
+        for _, flow in enumerate(module_and_flows[1:]):
+            setattr(module, flow.__name__, flow)
+            # # TODO: would the above fail if we use `from module import flow as f`?
+            # # maybe better to do, but probably not always in the same order!
+            # setattr(module, dependency_flows[i], flow)
+
+    for name, func_or_cls in flow_instances.items():
+        if no_wrap:
+            flow_instances[name] = func_or_cls
+        else:
+            flow_instances[name] = deklare_flow(func_or_cls)
+
+    return tuple([module] + list(flow_instances.values()))
+
+
+def _init_modules(module: importlib.ModuleType, flows: set, ignore: list, names: dict, external_tasks: list) -> tuple:
+    flow_instances, dependency_modules = {}, {}
 
     # Iterate over all functions defined in the module
-    for name, func_or_cls in inspect.getmembers(
-        module, predicate=is_module_function_or_class(module)
-    ):
+    for name, func_or_cls in inspect.getmembers(module, predicate=is_module_function_or_class(module)):
         if name in flows:
             # if member direct member of the module, we add it to the return flows
             # if not, it needs to be loaded appropriately from it's original module
@@ -107,33 +129,12 @@ def deklare_module(
             else:
                 # select to load it as a deklare dependency, i.e. load all required members
                 # as deklare tasks
-                dependency_modules[func_or_cls.__module__] = dependency_modules.get(
-                    func_or_cls.__module__, {}
-                ) | {name: func_or_cls}
-        elif name not in ignore and (
-            func_or_cls.__module__ == module.__name__ or name in external_tasks
-        ):
+                dependency_modules[func_or_cls.__module__] = dependency_modules.get(func_or_cls.__module__, {}) | {
+                    name: func_or_cls
+                }
+        elif name not in ignore and (func_or_cls.__module__ == module.__name__ or name in external_tasks):
             # Decorate the function and add it back to the module's namespace
             key_names = names.get(name, None)
             setattr(module, name, task(name=key_names)(func_or_cls))
 
-    for dependency_module, dependency_flows in dependency_modules.items():
-        dependency_flows_names = list(dependency_flows.keys())
-        module_and_flows = deklare_module(
-            dependency_module, flows=dependency_flows_names, no_wrap=True
-        )
-        for i, flow in enumerate(module_and_flows[1:]):
-            setattr(module, flow.__name__, flow)
-            # # TODO: would the above fail if we use `from module import flow as f`?
-            # # maybe better to do? but then we need to make sure that it's always the same order, because it's probably not!
-            # setattr(module, dependency_flows[i], flow)
-
-    for name, func_or_cls in flow_instances.items():
-        if no_wrap:
-            flow_instances[name] = func_or_cls
-        else:
-            # if inspect.isclass(func_or_cls):
-            #     func_or_cls = func_or_cls()
-            flow_instances[name] = deklare_flow(func_or_cls)
-
-    return tuple([module] + list(flow_instances.values()))
+    return flow_instances, dependency_modules

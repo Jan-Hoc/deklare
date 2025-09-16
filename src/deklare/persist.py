@@ -25,16 +25,21 @@ from cachetools import LRUCache
 
 # TODO: can we implement our own hash function for deskriptors to reduce dependency on dask?
 from dask.base import tokenize
+from typing import Any, Iterable
 
 import pystac
+from cachetools import Cache
 
 from .core import task
 from .utils import (
-    NodeFailedException,
+    NodeFailedError,
     dict_update,
     get_segments,
 )
 from .data_io import StacIO, DataContainer, MediaDescription
+
+# ToDo: Doc strings
+# ToDo: more precise types
 
 
 @task()
@@ -42,15 +47,15 @@ class Persister:
     def __init__(
         self,
         data_container: Type[DataContainer],
-        store=None,
-        stac_io: StacIO = None,
-        selected_keys=None,
-        force_update=False,
-        use_memorycache=True,
-        cache=None,
-        global_lock=None,
-        save_metadata=False,
-    ):
+        store: fsspec.FSMap = None,
+        stac_io: StacIO | None = None,
+        selected_keys: Iterable | None = None,
+        force_update: bool = False,
+        use_memorycache: bool = True,
+        cache: Cache | None = None,
+        global_lock: Lock = None,
+        save_metadata: bool = False,
+    ) -> None:
         super().__init__(force_update=force_update, use_memorycache=use_memorycache)
         if isinstance(store, str) or isinstance(store, Path):
             store = fsspec.get_mapper(store)
@@ -70,7 +75,7 @@ class Persister:
         self._mutex = Lock()
         self.save_metadata = save_metadata
 
-    def configure(self, deskriptor: dict | None = None):
+    def configure(self, deskriptor: dict | None = None) -> dict:
         deskriptor_hash = self.get_hash(deskriptor)
         data_path = f"data/{deskriptor_hash}"
 
@@ -90,10 +95,7 @@ class Persister:
             return deskriptor
 
         with self._mutex:
-            if (
-                deskriptor["self"].get("use_memorycache", True)
-                and data_path in self.cache
-            ):
+            if deskriptor["self"].get("use_memorycache", True) and data_path in self.cache:
                 deskriptor["remove_dependencies"] = True
                 # set the compute action to load
                 deskriptor["self"]["action"] = "load_from_cache"
@@ -158,11 +160,9 @@ class Persister:
                 item_metadata = data.get_stac_metadata() or {}
 
                 # write to file
-                if isinstance(data, NodeFailedException):
+                if isinstance(data, NodeFailedError):
                     self.store.dirfs.mkdirs("fail/", exist_ok=True)
-                    with self.store.dirfs.open(
-                        "fail/" + deskriptor["deskriptor_hash"], "wb"
-                    ) as f:
+                    with self.store.dirfs.open("fail/" + deskriptor["deskriptor_hash"], "wb") as f:
                         data.write(f)
 
                 else:
@@ -184,9 +184,9 @@ class Persister:
 
             return data
         else:
-            raise NodeFailedException("A bug in Persister. Please report.")
+            raise NodeFailedError("A bug in Persister. Please report.")
 
-    def is_valid(self, deskriptor: dict):
+    def is_valid(self, deskriptor: dict) -> bool | None:
         """Checks if persisted object for `deskriptor`
         exists and is valid (i.e. is not of type NodeFailedException).
 
@@ -194,7 +194,7 @@ class Persister:
             deskriptor (dict): The deskriptor that should be checked
 
         Returns:
-            boolean or None: Returns false if the persisted item is of type NodeFailedException
+            boolean | None: Returns false if the persisted item is of type NodeFailedException
                              Returns None if the deskriptor has not been persisted yet.
         """
         deskriptor_hash = self.get_hash(deskriptor)
@@ -214,19 +214,15 @@ class Persister:
             deskriptor (dict): deskriptor
 
         Returns:
-            str: hash of the requenst
+            str: hash of the request
         """
         r = {k: v for k, v in deskriptor.items() if k != "self"}
-        s = json.dumps(
-            r, sort_keys=True, skipkeys=True, default=Persister._string_timestamp
-        )
+        s = json.dumps(r, sort_keys=True, skipkeys=True, default=_string_timestamp)
         deskriptor_hash = tokenize(s)
 
         return deskriptor_hash
 
-    def _save_metadata(
-        self, deskriptor: dict, item_metadata: dict, file_info: MediaDescription
-    ) -> None:
+    def _save_metadata(self, deskriptor: dict, item_metadata: dict, file_info: MediaDescription) -> None:
         """saves metadata for given chunk using STAC (https://stacspec.org/)
 
         Args:
@@ -259,11 +255,12 @@ class Persister:
                 stac_io=self.stac_io,
             )
 
-    def _string_timestamp(o):
-        if hasattr(o, "isoformat"):
-            return o.isoformat()
-        else:
-            return str(o)
+
+def _string_timestamp(o: object) -> str:
+    if hasattr(o, "isoformat"):
+        return o.isoformat()
+    else:
+        return str(o)
 
 
 @task()
@@ -271,21 +268,21 @@ class ChunkPersister:
     def __init__(
         self,
         data_container: Type[DataContainer],
-        store=None,
-        filesystem=None,
+        store: fsspec.FSMap | None = None,
+        filesystem: fsspec.AbstractFileSystem | None = None,
         dim: str = "time",
-        # classification_scope:dict | Callable[...,dict]=None,
         segment_slice: dict | Callable[..., dict] = None,
         segment_stride: dict | Callable[..., dict] = None,
         dataset_scope: dict | Callable[..., dict] = None,
         mode: str = "overlap",
         reference: dict = None,
-        force_update=False,
-        collection_metadata: dict = {},
-        save_metadata=False,
-        use_memorycache=True,
-        cache=None,
-    ):
+        force_update: bool = False,
+        merge_function: Callable | None = None,
+        collection_metadata: dict | None = None,
+        save_metadata: bool = False,
+        use_memorycache: bool = True,
+        cache: Cache | None = None,
+    ) -> None:
         """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
 
@@ -300,18 +297,10 @@ class ChunkPersister:
             force_update (bool, optional): _description_. Defaults to False.
             collection_metadata (dict, optional): Further kwargs for STAC collection. May contain keys ['id', 'title', 'keywords', 'license', 'links', 'providers']. For 'links' and 'providers' lists of either corresponding STAC objects or dicts that can be used as kwargs to construct them. Defaults to {}.
         """
-        # if callable(classification_scope):
-        #     self.classification_scope = classification_scope
-        #     classification_scope = None
-        # else:
-        #     self.classification_scope = None
-
         self.data_container = data_container
 
         self.use_memorycache = use_memorycache
-        if cache is None:
-            cache = LRUCache(10)
-        self.cache = cache
+        self.cache = cache or LRUCache(10)
 
         if callable(segment_slice):
             self.segment_slice = segment_slice
@@ -329,7 +318,6 @@ class ChunkPersister:
 
         super().__init__(
             dim=dim,
-            # classification_scope=classification_scope,
             segment_slice=segment_slice,
             segment_stride=segment_stride,
             dataset_scope=dataset_scope,
@@ -346,27 +334,20 @@ class ChunkPersister:
         if isinstance(store, str) or isinstance(store, Path):
             store = fsspec.get_mapper(store)
 
-        if store is None:
-            store = self.filesystem.get_mapper()
-
-        self.store = store
+        self.store = store or self.filesystem.get_mapper()
 
         self.stac_io = StacIO(store=store)
 
         if self.save_metadata:
             # create collection if doesn't exist
             try:
-                collection = pystac.Collection.from_file(
-                    "/stac/collection.json", self.stac_io
-                )
-            except:
-                collection_metadata = ChunkPersister._process_collection_metadata(
-                    collection_metadata
-                )
+                collection = pystac.Collection.from_file("/stac/collection.json", self.stac_io)
+            except Exception:
+                collection_metadata = ChunkPersister._process_collection_metadata(collection_metadata or {})
                 collection = pystac.Collection(**collection_metadata[0])
 
-                for l in collection_metadata[1]:
-                    collection.add_link(l)
+                for link in collection_metadata[1]:
+                    collection.add_link(link)
 
                 collection.normalize_and_save(
                     root_href="/stac",  # pretend path is absolute so pystac doesnt try and change it
@@ -376,15 +357,15 @@ class ChunkPersister:
 
         self.mutex = Lock()
 
-    def __dask_tokenize__(self):
+    def __dask_tokenize__(self) -> tuple:
         return (ChunkPersister,)
 
-    def configure(self, deskriptor=None):
+    def configure(self, deskriptor: dict | None = None) -> dict:
         rs = deskriptor["self"]
         if rs.get("bypass", False):
             return deskriptor
 
-        def get_value(attr_name):
+        def get_value(attr_name: str) -> Any:  # noqa: ANN401
             # decide if we use the attribute provided in the deskriptor or
             # from a callback provided at initialization
             value = None
@@ -438,11 +419,7 @@ class ChunkPersister:
                 segment_deskriptor,
                 {
                     "config": {
-                        "keys": {
-                            self.dask_key_name + "_persister": {
-                                "force_update": rs.get("force_update", False)
-                            }
-                        }
+                        "keys": {self.dask_key_name + "_persister": {"force_update": rs.get("force_update", False)}}
                     }
                 },
             )
@@ -455,9 +432,7 @@ class ChunkPersister:
 
         return deskriptor
 
-    def compute(
-        self, *data: DataContainer | NodeFailedException, **deskriptor
-    ) -> DataContainer:
+    def compute(self, *data: DataContainer | NodeFailedError, **deskriptor) -> DataContainer:
         def unpack_list(inputlist):
             new_list = []
             for item in inputlist:
@@ -468,10 +443,10 @@ class ChunkPersister:
             return new_list
 
         data = unpack_list(data)
-        success = [d for d in data if not isinstance(d, NodeFailedException)]
+        success = [d for d in data if not isinstance(d, NodeFailedError)]
 
         if not success:
-            failed = [str(d) for d in data if isinstance(d, NodeFailedException)]
+            failed = [str(d) for d in data if isinstance(d, NodeFailedError)]
             raise RuntimeError(f"Failed to load data. Reason: {failed}")
 
         if self.save_metadata:
@@ -490,43 +465,28 @@ class ChunkPersister:
         section = self.data_container.merge(*success)
         return section
 
-    def _process_collection_metadata(
-        collection_metadata: dict = {},
-    ) -> tuple[dict, list]:
+    @staticmethod
+    def _process_collection_metadata(collection_metadata: dict | None = None) -> tuple[dict, list]:
         """return dict with arguments to create pystac.Collection
 
         Args:
-            collection_metadata (dict, optional): Dict containing keyword arguments for pystac.Collection constructor. Defaults to {}.
+            collection_metadata (dict, optional): Dict containing keyword arguments for pystac.Collection constructor
 
         Returns:
             (dict, list): dict with list of keyword arguments, list of pystac.Link objects to add to collection
         """
 
+        collection_metadata = collection_metadata or {}
+
         links = []
-        if "links" in collection_metadata and isinstance(
-            collection_metadata["links"], list
-        ):
-            for l in collection_metadata["links"]:
-                if isinstance(l, dict):
-                    l = pystac.Link(**l)
-                elif not isinstance(l, pystac.Link):
-                    continue
-                links.append(l)
+        for link in collection_metadata.get("links", []):
+            if isinstance(link, dict):
+                link = pystac.Link(**link)
+            elif not isinstance(link, pystac.Link):
+                continue
+            links.append(link)
 
-        kwargs = {
-            "id": "",
-            "description": "",
-            "extent": pystac.Extent(
-                spatial=pystac.SpatialExtent([None]),
-                temporal=pystac.TemporalExtent([[None, None]]),
-            ),
-            "title": "",
-            "catalog_type": pystac.CatalogType.SELF_CONTAINED,
-            "license": "",
-            "keywords": None,
-            "providers": None,
-        }
-
+        kwargs = copy(DEFAULT_KWARGS)
         blocked_kwargs = ["extent", "catalog_type", "links"]
         for k in collection_metadata:
             if k not in blocked_kwargs:
@@ -543,3 +503,18 @@ class ChunkPersister:
             kwargs["providers"] = providers
 
         return (kwargs, links)
+
+
+DEFAULT_KWARGS = {
+    "id": "",
+    "description": "",
+    "extent": pystac.Extent(
+        spatial=pystac.SpatialExtent([None]),
+        temporal=pystac.TemporalExtent([[None, None]]),
+    ),
+    "title": "",
+    "catalog_type": pystac.CatalogType.SELF_CONTAINED,
+    "license": "",
+    "keywords": None,
+    "providers": None,
+}

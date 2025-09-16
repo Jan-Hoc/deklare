@@ -1,62 +1,24 @@
+import traceback
+from typing import Callable
+
 import numpy as np
-import pandas as pd
+import torch
 from tqdm import tqdm
 
-from .utils import (
-    NodeFailedException,
-    get_segments,
-)
+from .utils import NodeFailedError
 
-import traceback
+# ToDo: Doc strings
+# ToDo: more precise types
 
 
-def get_dataset_segments(
-    catalog, segment_slice="60 seconds", segment_stride="60 seconds", mode="overlap", reference=None
-):
-    mode = {"time": mode}
-    segment_slice = {"time": pd.to_timedelta(segment_slice)}
-    segment_stride = {"time": pd.to_timedelta(segment_stride)}
-    classification_segments = []
-
-    for catalog_item in catalog:
-        if "station" not in catalog_item:
-            continue
-
-        non_sliced_segment = {
-            "time": {
-                "start": catalog_item["time"]["start"],
-                "end": catalog_item["time"]["end"],
-            },
-        }
-
-        segments = get_segments(
-            non_sliced_segment,
-            segment_slice,
-            segment_stride,
-            reference=reference,
-            mode=mode,
-            timestamps_as_strings=True,
-            minimal_number_of_segments=1,
-        )
-
-        for segment in segments:
-            segment["station"] = catalog_item["station"]
-            segment["network"] = catalog_item["network"]
-            segment["location"] = catalog_item["location"]
-            segment["channel"] = catalog_item["channel"]
-
-        classification_segments += segments
-
-    return classification_segments
-
-
+# ToDo: class attributes
 class Dataset:
     def __init__(
         self,
-        deskriptors,
-        flows,
-        transforms=None,
-    ):
+        deskriptors: list[dict],
+        flows,  # ToDo: typing # noqa: ANN001
+        transforms: list[Callable] | Callable | None = None,
+    ) -> None:
         self.singleton = False
 
         if not isinstance(flows, list):
@@ -74,14 +36,15 @@ class Dataset:
         self.transforms = transforms
 
     @property
-    def deskriptors(self):
+    def deskriptors(self) -> dict:
         return self.dataset_deskriptors[self.indices]
 
-    def mask_invalid(self):
+    def mask_invalid(self) -> None:
         local_dict = self.invalid_indices
         self.indices = [x for x in self.indices if x not in local_dict]
 
-    def valid(self, idx):
+    # ToDo: check if this needs to be so complicated
+    def valid(self, idx: int) -> bool:
         if idx in self.valid_indices:
             return True
         if idx in self.invalid_indices:
@@ -91,21 +54,19 @@ class Dataset:
         # so let's do it
         try:
             result = self.__getitem__(idx, only_validity=True)
-            if isinstance(result, NodeFailedException):
+            if isinstance(result, NodeFailedError):
                 return False
             if isinstance(result, tuple):
-                return all(
-                    [not isinstance(item, NodeFailedException) for item in result]
-                )
+                return all([not isinstance(item, NodeFailedError) for item in result])
             return True
-        except Exception as e:
+        except Exception:
             tqdm.write(traceback.format_exc())
             return False
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.indices)
 
-    def __getitem__(self, idx, only_validity=False):
+    def __getitem__(self, idx: int) -> tuple:
         singleton = self.singleton
 
         stream_select = np.arange(len(self.flows))
@@ -137,20 +98,18 @@ class Dataset:
 
         return tuple(out)
 
-    def check_validity(self, batch_size=1, num_workers=0):
+    def check_validity(self, batch_size: int = 1, num_workers: int = 0) -> None:
         temp_transforms = self.transforms
         self.transforms = None
 
         this = self
 
         class TmpClass:
-            def __getitem__(self, idx):
+            def __getitem__(self, idx: int) -> tuple:
                 return (idx, this.valid(idx))
 
-            def __len__(self):
+            def __len__(self) -> int:
                 return len(this)
-
-        import torch
 
         for batch in tqdm(
             torch.utils.data.dataloader.DataLoader(
@@ -172,7 +131,7 @@ class Dataset:
 
         self.transforms = temp_transforms
 
-    def preload(self, batch_size=1, num_workers=0):
+    def preload(self, batch_size: int = 1, num_workers: int = 0) -> None:
         """Using pytorch to preload this dataset, i.e. run through the whole dataset once.
         The caching/persisting will happen inside the individual flows
 
@@ -183,16 +142,15 @@ class Dataset:
         """
         temp_transforms = self.transforms
         self.transforms = None
-        import torch
 
-        for item in tqdm(
+        for _ in tqdm(
             torch.utils.data.dataloader.DataLoader(
                 self,
                 batch_size=batch_size,
                 num_workers=num_workers,
                 drop_last=False,
                 shuffle=False,
-                collate_fn=lambda x: [],
+                collate_fn=lambda _: [],
             )
         ):
             continue

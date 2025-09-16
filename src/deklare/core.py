@@ -17,6 +17,8 @@ import functools
 import inspect
 import warnings
 from copy import copy, deepcopy
+from types import TracebackType
+from typing import Any, Callable
 from uuid import uuid4
 
 import dask
@@ -24,78 +26,71 @@ import dask.delayed
 from dask.delayed import Delayed
 
 KEY_SEP = "+"
+PROTECTED_DESKRIPTOR_KEYS = ["self", "config"]
+PROTECTED_CONFIG_KEYS = ["global", "types", "keys"]
+
+# ToDo: Doc strings
+# ToDo: more precise types
 
 
 class FlowContext:
-    __context: dict = {}
+    __context: dict[str, Callable] = {}
     __enabled: bool = False
 
     @classmethod
-    def get(name):
-        return FlowContext.__context[name]
+    def get(cls, name: str) -> Callable:
+        return cls.__context[name]
 
     @staticmethod
-    def exists(name):
+    def exists(name: str) -> bool:
         return name in FlowContext.__context
 
     @staticmethod
-    def set(name, value):
+    def set(name: str, value: Callable) -> None:
         FlowContext.__context[name] = value
 
     @staticmethod
-    def is_enabled():
+    def is_enabled() -> bool:
         return FlowContext.__enabled
 
     @staticmethod
-    def set_enabled(value: bool):
+    def set_enabled(value: bool) -> None:
         FlowContext.__enabled = value
 
     @staticmethod
-    def reset():
+    def reset() -> None:
         FlowContext.__enabled = False
         FlowContext.__context = {}
 
 
-class create_taskgraph:
-    def __init__(self):
+class TaskGraphCreator:
+    prev: bool
+
+    def __init__(self) -> None:
         self.prev = False
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         global is_enabled
         FlowContext.reset()
         FlowContext.set_enabled(True)
         is_enabled = True
 
-    def __exit__(self, type, value, traceback):
+    def __exit__(
+        self, _type: BaseException | None, _value: BaseException | None, traceback: TracebackType | None
+    ) -> bool | None:
         global is_enabled
         is_enabled = False
         FlowContext.reset()
-
-
-def dict_update(base, update, convert_nestedfrozen=False):
-    if not isinstance(base, dict) or not isinstance(update, dict):
-        raise TypeError(
-            f"dict_update requires two dicts as input. But we received {type(base)} and {type(update)}"
-        )
-
-    for key in update:
-        if isinstance(base.get(key), dict) and isinstance(update[key], dict):
-            if convert_nestedfrozen:
-                base[key] = dict(base[key])
-            base[key] = dict_update(
-                base[key], update[key], convert_nestedfrozen=convert_nestedfrozen
-            )
-        else:
-            base[key] = update[key]
-
-    return base
 
 
 is_enabled = False
 
 
 class Node(object):
-    def __init__(self, **kwargs):
+    _name: str | None
+    config: dict
+
+    def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401
         self.config = locals().copy()
         # FIXME: This works but there are better solutions!
         while "kwargs" in self.config:
@@ -109,7 +104,7 @@ class Node(object):
 
         self._name = None
 
-    def merge_config(self, deskriptor):
+    def merge_config(self, deskriptor: dict) -> dict:
         """Each deskriptor contains configuration which may apply to different
         node instances. This function collects all information that apply to _this_
         node (including it's preset configs) and adds a `self` keyword to the deskriptor.
@@ -120,73 +115,13 @@ class Node(object):
         Returns:
             dict: A new deskriptor which specific to this node.
         """
-        protected_keys = ["self", "config"]
+        new_deskriptor = self._copy_deskriptor(deskriptor)
 
-        new_deskriptor = {}
-        new_deskriptor.update(deskriptor)
-        new_deskriptor["self"] = {}
-        if hasattr(self, "config"):
-            new_deskriptor["self"].update(deepcopy(self.config))
-        for key in deskriptor:
-            # we consider any key that is not a protected key a global key
-            if key not in protected_keys:
-                new_deskriptor["self"][key] = deskriptor[key]
+        self._update_deskriptor_config(deskriptor, new_deskriptor)
 
-        if deskriptor.get("config", None) is not None:
-            PROTECTED_CONFIG_KEYS = ["global", "types", "keys"]
-
-            # new_deskriptor['config'] = {}
-
-            # We'll go through all parameters in the deskriptor's config
-            # and add them to the self parameters
-
-            # We assume that anything within 'config' is global
-            for key in deskriptor["config"]:
-                if key in PROTECTED_CONFIG_KEYS:
-                    continue
-                new_deskriptor["self"][key] = deskriptor["config"][key]
-
-                # # add to new_deskriptor
-                # new_deskriptor['config'][key] = deskriptor["config"][key]
-
-            # add specific global config entries
-            if "global" in deskriptor["config"]:
-                for key in deskriptor["config"]["global"]:
-                    new_deskriptor["self"][key] = deskriptor["config"]["global"][key]
-
-                # # add to new_deskriptor
-                # new_deskriptor['config']['global'] = deskriptor["config"]["global"]
-
-            # add type specific configs (overwrites global config)
-            if "types" in deskriptor["config"]:
-                if type(self).__name__ in deskriptor["config"]["types"]:
-                    dict_update(
-                        new_deskriptor["self"],
-                        deskriptor["config"]["types"][type(self).__name__],
-                    )
-
-                # # add to new_deskriptor
-                # new_deskriptor['config']['types'] = deskriptor["config"]["types"]
-
-            # add key specific configs (overwrites global and type config)
-            if "keys" in deskriptor["config"]:
-                if self.dask_key_name in deskriptor["config"]["keys"]:
-                    dict_update(
-                        new_deskriptor["self"],
-                        deskriptor["config"]["keys"][self.dask_key_name],
-                    )
-
-                    # TODO: It should be save to remove these keys from the new_deskriptor!?
-                    del new_deskriptor["config"]["keys"][self.dask_key_name]
-
-                # TODO: should we prefer the following way of removing the config?
-                # new_deskriptor['config']['keys'] = {k:v for k,v in deskriptor["config"]["keys"].items() if k != self.dask_key_name}
-
-        if "config" in deskriptor:
-            new_deskriptor["config"] = deskriptor["config"]
         return new_deskriptor
 
-    def configure(self, deskriptor):
+    def configure(self, deskriptor: dict) -> dict:
         """Before a task graph is executed each node is configured.
             The deskriptor is propagated from the end to the beginning
             of the DAG and each nodes "configure" routine is called.
@@ -210,7 +145,7 @@ class Node(object):
             dependant configurations here.
 
         Args:
-            deskriptors {List} -- List of deskriptors (i.e. dictionaries).
+            deskriptor (dict): deskriptor to merge with own config.
 
 
         Returns:
@@ -228,9 +163,10 @@ class Node(object):
 
         # set default
         merged_deskriptor["requires_deskriptor"] = True
+
         return merged_deskriptor
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         name = kwargs.get("name", None)
         context = kwargs.get("context", None)
         if name is not None and KEY_SEP in name:
@@ -253,105 +189,154 @@ class Node(object):
 
         if context.is_enabled():
             func = dask.delayed(forward_func)(*args, dask_key_name=name, **kwargs)
-            # func = dask.delayed(forward_func)(data=None, deskriptor=None,
-            #     dask_key_name=name
-            # )
             self.dask_key_name = func.key
             return func
         else:
             return forward_func(*args, **kwargs)
 
+    def _copy_deskriptor(self, deskriptor: dict) -> dict:
+        new_deskriptor = deepcopy(deskriptor)
 
-def it(flow):
+        new_deskriptor["self"] = {}
+        if hasattr(self, "config"):
+            new_deskriptor["self"].update(deepcopy(self.config))
+
+        for key in deskriptor:
+            if key not in PROTECTED_DESKRIPTOR_KEYS:
+                new_deskriptor["self"][key] = deskriptor[key]
+
+        return new_deskriptor
+
+    def _update_deskriptor_config(self, old_deskriptor: dict, new_deskriptor: dict) -> None:
+        assert isinstance(new_deskriptor["self"], dict)  # for type hints, is set to dict in _copy_deskriptor
+
+        if old_deskriptor.get("config", None) is not None:
+            # go through all parameters in the deskriptor's config and add them to the self parameters
+
+            # assume anything within 'config' is global
+            for key in old_deskriptor["config"]:
+                if key in PROTECTED_CONFIG_KEYS:
+                    continue
+
+                new_deskriptor["self"][key] = old_deskriptor["config"][key]
+
+            # add specific global config entries
+            if "global" in old_deskriptor["config"]:
+                for key in old_deskriptor["config"]["global"]:
+                    new_deskriptor["self"][key] = old_deskriptor["config"]["global"][key]
+
+            # add type specific configs (overwrites global config)
+            if "types" in old_deskriptor["config"]:
+                if type(self).__name__ in old_deskriptor["config"]["types"]:
+                    new_deskriptor["self"].update(deepcopy(old_deskriptor["config"]["types"][type(self).__name__]))
+
+            # add key specific configs (overwrites global and type config)
+            if "keys" in old_deskriptor["config"]:
+                if self.dask_key_name in old_deskriptor["config"]["keys"]:
+                    new_deskriptor["self"].update(deepcopy(old_deskriptor["config"]["types"][self.dask_key_name]))
+
+                    # TODO: It should be safe to remove these keys from the new_deskriptor!?
+                    del new_deskriptor["config"]["keys"][self.dask_key_name]
+
+                # TODO: should we prefer the following way of removing the config?
+                # new_deskriptor['config']['keys'] = {k:v for k,v in old_deskriptor["config"]["keys"].items() if k != self.dask_key_name}  # noqa: E501
+
+            new_deskriptor["config"] = old_deskriptor["config"]
+
+
+# ToDo: fix types
+def init_flow_graph(flow: type | Callable):
     if inspect.isclass(flow):
         flow = flow()
 
-    with create_taskgraph():
+    with TaskGraphCreator():
         flow_graph = flow()
 
     return flow_graph
 
 
-def task(name=None, context=None):
-    if context is None:
-        context = FlowContext
+def task(name: str | None = None, context: FlowContext | None = None) -> Callable:
+    context = context or FlowContext
 
-    def decorator_task(func_or_cls):
-        if inspect.isclass(func_or_cls):
-            cls = func_or_cls
-
-            if cls.__name__ == "DeklareClass": # Keep this check if "DeklareClass" is still a sentinel
-                # don't wrap it twice!
-                return cls
-
-            # Create a new class dynamically with the original class's name
-            # The new class inherits from the original cls and Node
-            new_cls_name = cls.__name__
-            bases = (cls, Node)
-            new_cls_dict = {}
-
-            # Define __init__ for the new class
-            def __init__(self, *args, **kwargs):
-                super(type(self), self).__init__(*args, **kwargs)
-                self._name = getattr(self, '_name', None) or name
-
-            new_cls_dict['__init__'] = __init__
-
-            # Dynamically create the new class
-            NewWrappedClass = type(new_cls_name, bases, new_cls_dict)
-
-            # Check if the original class defines configure
-            if "configure" in cls.__dict__:
-                original_inherit_method = cls.__dict__["configure"]
-
-                def new_configure(self, deskriptor):
-                    # Ensure Node.configure is called correctly
-                    deskriptor = Node.configure(self, deskriptor)
-                    return original_inherit_method(self, deskriptor)
-
-                setattr(NewWrappedClass, "configure", new_configure)
-
-            # Rename cls's __call__ method to compute
-            if "__call__" in cls.__dict__:
-                # Directly set 'compute' to the original __call__ method
-                setattr(NewWrappedClass, "compute", cls.__dict__["__call__"])
-                # Use Node's __call__ method as NewWrappedClass's __call__ method
-                setattr(NewWrappedClass, "__call__", Node.__call__)
-
-            return NewWrappedClass
-        else:
-            func = func_or_cls
-
-            if isinstance(func, Delayed):
-                # don't wrap it twice!
-                return func
-
-            @functools.wraps(func)
-            def wrapper_decorator(*args, **kwargs):
-                if context.is_enabled():
-                    if name is None:
-                        key_name = func.__name__
-                    else:
-                        key_name = name
-
-                    ext = ""
-                    while context.exists(key_name + ext):
-                        ext = uuid4().hex[-6:]
-
-                    key_name = key_name + ext
-                    context.set(key_name, func)
-
-                    if ext != "":
-                        warnings.warn(
-                            f"Duplicate name detected. Name changed to {key_name}"
-                        )
-
-                    # make a graph node
-                    return dask.delayed(func)(*args, dask_key_name=key_name, **kwargs)
-                else:
-                    # compute function and return result
-                    return func(*args, **kwargs)
-
-        return wrapper_decorator
+    def decorator_task(func_or_cls: type | Callable) -> type | Callable:
+        return (
+            _wrap_class(func_or_cls, name)
+            if inspect.isclass(func_or_cls)
+            else _wrap_function(func_or_cls, name, context)
+        )
 
     return decorator_task
+
+
+def _wrap_class(cls: type, name: str | None = None) -> type:
+    if cls.__name__ == "DeklareClass":  # Keep this check if "DeklareClass" is still a sentinel
+        # don't wrap it twice!
+        return cls
+
+    # Create a new class dynamically with the original class's name
+    # The new class inherits from the original cls and Node
+    new_cls_name = cls.__name__
+    bases = (cls, Node)
+    new_cls_dict = {}
+
+    # Define __init__ for the new class
+    def new_init(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN001, ANN401
+        super(type(self), self).__init__(*args, **kwargs)
+        self._name = getattr(self, "_name", None) or name
+
+    new_cls_dict["__init__"] = new_init
+
+    # Dynamically create the new class
+    new_cls = type(new_cls_name, bases, new_cls_dict)
+
+    # Check if the original class defines configure
+    if "configure" in cls.__dict__:
+        original_inherit_method = cls.__dict__["configure"]
+
+        def new_configure(self: type, deskriptor: dict) -> dict:
+            # Ensure Node.configure is called correctly
+            deskriptor = Node.configure(self, deskriptor)
+            return original_inherit_method(self, deskriptor)
+
+        new_cls.configure = new_configure
+
+    # Rename cls's __call__ method to compute
+    if "__call__" in cls.__dict__:
+        # Directly set 'compute' to the original __call__ method
+        new_cls.compute = cls.__dict__["__call__"]
+        # Use Node's __call__ method as NewWrappedClass's __call__ method
+        new_cls.__call__ = Node.__call__
+
+    return new_cls
+
+
+def _wrap_function(func: Callable, name: str | None, context: FlowContext) -> Callable:
+    if isinstance(func, Delayed):
+        # don't wrap it twice!
+        return func
+
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if context.is_enabled():
+            if name is None:
+                key_name = func.__name__
+            else:
+                key_name = name
+
+            ext = ""
+            while context.exists(key_name + ext):
+                ext = uuid4().hex[-6:]
+
+            key_name = key_name + ext
+            context.set(key_name, func)
+
+            if ext != "":
+                warnings.warn(f"Duplicate name detected. Name changed to {key_name}", stacklevel=1)
+
+            # make a graph node
+            return dask.delayed(func)(*args, dask_key_name=key_name, **kwargs)
+        else:
+            # compute function and return result
+            return func(*args, **kwargs)
+
+    return wrapper

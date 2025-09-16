@@ -13,79 +13,85 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License."""
 
-import dask
-from dask.delayed import Delayed
-import warnings
-import pandas as pd
-from .deskribe import Range
+import itertools
 import math
+import warnings
+from typing import Any, Iterable
 
+import pandas as pd
+import xarray as xr
+from dask.base import _extract_graph_and_keys
+from dask.delayed import Delayed
+from dask.typing import Graph
+from pandas._libs.tslibs.nattype import NaTType
+from pandas.core.tools.datetimes import DatetimeScalar
+
+from .deskribe import Range
 from .graph import base_name
 
+# ToDo: Doc strings
+# ToDo: more precise types
 
-def indexers_to_slices(indexers):
+
+def indexers_to_slices(indexers: dict) -> dict:
     new_indexers = {}
-    for key in indexers:
-        if isinstance(indexers[key], dict):
-            ni = {"start": None, "end": None, "step": None}
-            ni.update(indexers[key])
-            new_indexers[key] = slice(ni["start"], ni["end"], ni["step"])
+    for idxr, key in indexers.items():
+        if isinstance(idxr, dict):
+            new_idxr = {"start": None, "end": None, "step": None}
+            new_idxr.update(idxr)
+            new_indexers[key] = slice(new_idxr["start"], new_idxr["end"], new_idxr["step"])
         else:
-            new_indexers[key] = indexers[key]
+            new_indexers[key] = idxr
 
     return new_indexers
 
 
-def exclusive_indexing(x, indexers):
+def exclusive_indexing(x: xr.DataArray, indexers: dict) -> xr.DataArray:
     # Fake `exlusive indexing`
     drop_indexers = {k: indexers[k]["end"] for k in indexers if "end" in indexers[k]}
     try:
         x = x.drop_sel(drop_indexers, errors="ignore")
-    except Exception:
+    # ToDo: proper logging
+    except Exception:  # noqa: S110
         pass
 
     return x
 
 
-class NodeFailedException(Exception):
-    def __init__(self, exception=None):
+class NodeFailedError(Exception):
+    def __init__(self, exception: Exception | str = "NodeFailedError") -> None:
         """The default exception when a node's compute function fails and failsafe mode
         is enable, i.e. the global setting `fail_mode` is not set to `fail`.
         this exception is caught by the foreal processing system and depending on the
         global variable `fail_mode`, leads to process interruption or continuation.
 
         Args:
-            exception (any, optional): The reason why it failed, e.g. another exception.
+            exception (Exception | str, optional): The reason why it failed, e.g. another exception.
                 Defaults to None.
         """
-        # if get_setting("fail_mode") == "warning" or get_setting("fail_mode") == "warn":
-        #     print(exception)
         self.exception = exception
 
-    def __str__(self):
+    def __str__(self) -> str:
         return str(self.exception)
 
 
-def dict_update(base, update):
-    if not isinstance(base, dict) or not isinstance(update, dict):
-        raise TypeError(
-            f"dict_update requires two dicts as input. But we received {type(base)} and {type(update)}"
-        )
-
+def dict_update(base: dict, update: dict, convert_nestedfrozen: bool = False) -> dict:
     for key in update:
         if isinstance(base.get(key), dict) and isinstance(update[key], dict):
-            base[key] = dict_update(base[key], update[key])
+            if convert_nestedfrozen:
+                base[key] = dict(base[key])
+            base[key] = dict_update(base[key], update[key], convert_nestedfrozen=convert_nestedfrozen)
         else:
             base[key] = update[key]
 
     return base
 
 
-def extract_subgraphs(taskgraph, keys, match_base_name=False):
+def extract_subgraphs(taskgraph: list[Graph] | Graph, keys: Iterable, match_base_name: bool = False) -> Delayed:
     if not isinstance(taskgraph, list):
         taskgraph = [taskgraph]
 
-    extracted_graph, ck = dask.base._extract_graph_and_keys(taskgraph)
+    extracted_graph, _ = _extract_graph_and_keys(taskgraph)
     if match_base_name:
         configured_graph_keys = list(extracted_graph.keys())
         new_keys = []
@@ -94,24 +100,23 @@ def extract_subgraphs(taskgraph, keys, match_base_name=False):
                 if base_name(sk) == base_name(k):
                     new_keys += [k]
         keys = new_keys
+
     return Delayed(keys, extracted_graph)
 
 
-def to_datetime(x, **kwargs):
+def to_datetime(x: DatetimeScalar, **kwargs: Any) -> NaTType:  # noqa: ANN401
     # overwrites default
-    utc = kwargs.pop("utc", True)
-    if not utc:
-        warnings.warn(
-            "to_datetime overwrites your keyword utc argument and enforces `utc=True`"
-        )
+    if not kwargs.pop("utc", True):
+        warnings.warn("to_datetime overwrites your keyword utc argument and enforces `utc=True`", stacklevel=1)
+
     return pd.to_datetime(x, utc=True, **kwargs).tz_localize(None)
 
 
-def is_datetime(x):
+def is_datetime(x: Any) -> bool:  # noqa: ANN401
     return pd.api.types.is_datetime64_any_dtype(x)
 
 
-def to_datetime_conditional(x, condition=True, **kwargs):
+def to_datetime_conditional(x: Any, condition: bool | DatetimeScalar | pd.Timedelta = True, **kwargs: Any) -> xr:  # noqa: ANN401
     # converts x to datetime if condition is true or the object in condition is datetime or timedelta
     if not isinstance(condition, bool):
         condition = is_datetime(condition) or isinstance(condition, pd.Timedelta)
@@ -121,25 +126,23 @@ def to_datetime_conditional(x, condition=True, **kwargs):
     return x
 
 
-def get_segments(
-    dataset_scope,
-    segment_slice,
-    segment_stride=None,
-    reference=None,
-    mode="overlap",
-    minimal_number_of_segments=0,
-    timestamps_as_strings=False,
-    utc_no_tz=True,
-):
+# ToDo: simplify and break up function
+def get_segments(  # noqa: C901
+    dataset_scope: dict,
+    segment_slice: dict,
+    segment_stride: dict | None = None,
+    reference: dict | None = None,
+    mode: str = "overlap",
+    minimal_number_of_segments: int = 0,
+    timestamps_as_strings: bool = False,
+    utc_no_tz: bool = True,
+) -> list[dict]:
     # modified from and thanks to xbatcher: https://github.com/rabernat/xbatcher/
     if isinstance(mode, str):
         mode = {dim: mode for dim in segment_slice}
 
-    if segment_stride is None:
-        segment_stride = {}
-
-    if reference is None:
-        reference = {}
+    segment_stride = segment_stride or {}
+    reference = reference or {}
 
     dim_slices = []
     dims = []
@@ -173,54 +176,33 @@ def get_segments(
 
             # make sure _segment_stride and _segment_slice have right orientation
             if not isinstance(_segment_stride, pd.Timedelta):
-                if (
-                    dataset_scope_dim["end"] - dataset_scope_dim["start"]
-                ) * _segment_stride < 0:
+                if (dataset_scope_dim["end"] - dataset_scope_dim["start"]) * _segment_stride < 0:
                     _segment_stride *= -1
                 if _segment_slice * _segment_stride < 0:
                     _segment_slice *= -1
 
-            segment_start = to_datetime_conditional(
-                dataset_scope_dim["start"], _segment_slice
-            )
-            segment_end = to_datetime_conditional(
-                dataset_scope_dim["end"], _segment_slice
-            )
+            segment_start = to_datetime_conditional(dataset_scope_dim["start"], _segment_slice)
+            segment_end = to_datetime_conditional(dataset_scope_dim["end"], _segment_slice)
 
             if mode[dim] == "overlap":
                 # TODO: add options for closed and open intervals
                 # first get the lowest that window that still overlaps with our segment
-                segment_start = (
-                    segment_start
-                    - math.floor(_segment_slice / _segment_stride) * _segment_stride
-                )
+                segment_start = segment_start - math.floor(_segment_slice / _segment_stride) * _segment_stride
                 # then align to the grid if necessary
                 if dim in reference:
                     ref_dim = to_datetime_conditional(reference[dim], _segment_slice)
-                    segment_start = (
-                        math.ceil((segment_start - ref_dim) / _segment_stride)
-                        * _segment_stride
-                        + ref_dim
-                    )
+                    segment_start = math.ceil((segment_start - ref_dim) / _segment_stride) * _segment_stride + ref_dim
 
             elif mode[dim] == "fit":
                 if dim in reference:
                     ref_dim = to_datetime_conditional(reference[dim], _segment_slice)
-                    segment_start = (
-                        math.floor((segment_start - ref_dim) / _segment_stride)
-                        * _segment_stride
-                        + ref_dim
-                    )
+                    segment_start = math.floor((segment_start - ref_dim) / _segment_stride) * _segment_stride + ref_dim
                 else:
-                    raise RuntimeError(
-                        f"mode `fit` requires that dimension {dim} is in reference {reference}"
-                    )
+                    raise RuntimeError(f"mode `fit` requires that dimension {dim} is in reference {reference}")
             else:
                 RuntimeError(f"Unknown mode {mode[dim]}. It must be `fit` or `overlap`")
 
-        if isinstance(
-            segment_slice[dim], pd.Timedelta
-        ):  # or isinstance(segment_slice[dim], dt.timedelta):
+        if isinstance(segment_slice[dim], pd.Timedelta):  # or isinstance(segment_slice[dim], dt.timedelta):
             # TODO: change when xarray #3291 is fixed
             iterator = pd.date_range(segment_start, segment_end, freq=_segment_stride)
             segment_end = pd.to_datetime(segment_end)
@@ -233,15 +215,8 @@ def get_segments(
 
             if (
                 start <= end
-                or (
-                    not isinstance(_segment_stride, pd.Timedelta)
-                    and _segment_slice < 0
-                    and start >= end
-                )
-                or (
-                    len(slices) < minimal_number_of_segments
-                    and not isinstance(dataset_scope_dim, list)
-                )
+                or (not isinstance(_segment_stride, pd.Timedelta) and _segment_slice < 0 and start >= end)
+                or (len(slices) < minimal_number_of_segments and not isinstance(dataset_scope_dim, list))
             ):
                 if is_datetime(start):
                     if utc_no_tz:
@@ -260,11 +235,9 @@ def get_segments(
                     slices.append({"start": start, "end": end})
         dim_slices.append(slices)
 
-    import itertools
-
     all_slices = []
     for slices in itertools.product(*dim_slices):
-        selector = {key: slice for key, slice in zip(dims, slices)}
+        selector = {key: dim_slice for key, dim_slice in zip(dims, slices, strict=False)}
         all_slices.append(selector)
 
     return all_slices
