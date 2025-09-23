@@ -66,10 +66,12 @@ def transform_to_nested(input: dict, split: str = ".") -> dict:
         current[parts[-1]] = value
     return transformed
 
+
 # class DeskriptorConfig(BaseModel):
-#     global: 
+#     global:
 #     types:
 #     keys:
+
 
 class Deskriptor(BaseModel, validate_assignment=True):
     config: Dict | None = None
@@ -128,3 +130,37 @@ class Deskriptor(BaseModel, validate_assignment=True):
                     kwargs[key] = value
 
         return cls(**kwargs)
+
+    @staticmethod
+    def update_from_config_dict(deskriptor: dict, config: dict) -> dict:
+        """checks if deskriptor has config defaults defined in deskriptor['config']['config']
+        replaces values in config if not present in deskriptor
+
+        Args:
+            deskriptor (dict): original deskriptor
+            config (dict): config with default values
+
+        Returns:
+            dict: updated deskriptor
+        """
+        if "config" not in deskriptor:
+            return deskriptor
+
+        config_keys = deskriptor["config"]
+
+        if "config" not in config_keys:
+            deskriptor
+
+        config_keys = config_keys["config"]
+
+        for key, entry in config_keys.items():
+            if key not in config:
+                raise KeyError(f"Invalid config key '{key}' (not present)")
+            if entry not in config[key]:
+                raise KeyError(f"Invalid config key '{key}'/'{entry}' (not present)")
+
+            # dont replace if already in deskriptor
+            if key not in deskriptor:
+                deskriptor[key] = config[key][entry]
+
+        return deskriptor
