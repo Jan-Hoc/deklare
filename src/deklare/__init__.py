@@ -15,6 +15,9 @@ limitations under the License."""
 
 import importlib
 import inspect
+import yaml
+import os
+from pathlib import Path
 
 from .core import it, task
 from .graph import Node, compute
@@ -22,8 +25,20 @@ from .persist import ChunkPersister, Persister
 from .deskribe import Deskriptor
 
 
-def deklare_flow(flow, templateDeskriptor: Deskriptor = None):
+def deklare_flow(
+    flow,
+    template_deskriptor: Deskriptor | None = None,
+    config_path: Path | str | None = None,
+):
     flow_graph = it(flow)
+
+    config_deskriptor = None
+    if config_path is not None:
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+
+        with open(config_path, "r") as f:
+            config_deskriptor = yaml.safe_load(f)
 
     def deklare_flow_function(self, deskriptor):
         return compute(flow_graph, deskriptor)
@@ -32,8 +47,13 @@ def deklare_flow(flow, templateDeskriptor: Deskriptor = None):
         return query(deskriptor)
 
     def query(deskriptor):
-        if templateDeskriptor:
-            deskriptor = templateDeskriptor.from_dict(deskriptor).to_dict()
+        if config_deskriptor:
+            deskriptor = Deskriptor.update_from_config_dict(
+                deskriptor, config_deskriptor
+            )
+
+        if template_deskriptor:
+            deskriptor = template_deskriptor.from_dict(deskriptor).to_dict()
         return compute(flow_graph, deskriptor)
 
     if hasattr(flow, "__self__") and flow.__self__ is not None:
