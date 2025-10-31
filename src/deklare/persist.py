@@ -19,7 +19,7 @@ import warnings
 from copy import copy, deepcopy
 from pathlib import Path
 from threading import Lock
-from typing import Callable, TypeVar, Generic
+from typing import Callable, TypeVar, Type, NamedTuple, Self, IO
 from abc import ABC, abstractmethod
 
 import pandas as pd
@@ -44,6 +44,9 @@ import fsspec
 
 from .utils import get_segments
 
+class MediaDescription(NamedTuple):
+    media_type: str
+    description: str
 
 class StacIO(pystac.StacIO):
     def __init__(self, store):
@@ -167,101 +170,72 @@ class StacIO(pystac.StacIO):
 
         return description
 
-T = TypeVar("T")
 
-
-class StorageManager(ABC, Generic[T]):
-    # @abstractmethod
-    # def write_buffer(self, data: T, buffer: io.BytesIO =None) -> io.BytesIO:
-    #     """Takes the data and returns it as a buffer containing data in desired format
-
-    #     Args:
-    #         data (T): data to be saved
-
-    #     Returns:
-    #         io.BytesIO: buffer containing data in desired format
-    #     """
-    #     pass
-
-    # @abstractmethod
-    # def read_buffer(self, buffer: io.BytesIO) -> T:
-    #     """Read the data in buffer and returns the read data in the same format as it was received in write
-
-    #     Args:
-    #         buffer (io.BytesIO): buffer containing saved data
-
-    #     Returns:
-    #         T: data in buffer
-    #     """
-    #     pass
-
+class DataContainer(ABC):
     @abstractmethod
-    def write(self, file, data: T):
+    def write(self, file: IO) -> None:
         """Takes the data and writes it to the file
 
         Args:
-            data (T): data to be saved
-
+            file (IO): file-like object to save data from itself too
         """
         pass
 
+    @classmethod
     @abstractmethod
-    def read(self, file) -> T:
-        """Returns the read data in the same format as it was received in write
+    def read(cls, file: IO) -> Self:
+        """Reads the data in file and creates new data container from it
 
         Args:
-            file (): file containing saved data
+            file (IO): file-like object containing saved data
 
         Returns:
-            T: data from file
+            DataContainer: Container containing data saved in file
         """
         pass
 
     @abstractmethod
-    def file_info(self) -> tuple[str, str]:
+    def get_stac_metadata(self) -> dict | None:
+        """optionally returns STAC metadata for the contained data
+
+        returns:
+            dict | None: dict containing STAC metadata or None for no metadata
+        """
+        pass
+
+    @classmethod
+    @abstractmethod
+    def merge(cls, *elements: Self) -> Self:
+        """merge the elements into a single DataContainer instance
+        if no elements are passed return an empty container, if only one is passed acts as the identity function
+
+        Args:
+            elements (DataContainer): list of data containers to merge
+
+        Returns:
+            DataContainer: DataContainer resulting from merging elements
+        """
+        pass
+
+    @classmethod
+    @abstractmethod
+    def file_info(cls) -> MediaDescription:
         """return media type and text describtion of file saved in `write` function
         media type should be registered in https://www.iana.org/assignments/media-types/media-types.xhtml e.g. `image/tiff`
         description should be human readable with information needed to read file
 
         Returns:
-            tuple[str, str]: (media type, description)
+            MediaDescription: (media type, description)
         """
         pass
-
-
-class PickleStorageManager(StorageManager):
-    def __init__(self, compression="gzip"):
-        super().__init__()
-        self.compression = compression
-
-    # def write_buffer(self, data: T, buffer: io.BytesIO =None) -> io.BytesIO:
-    #     if buffer is None:
-    #         buffer = io.BytesIO()
-    #     dump(data, buffer, compression=self.compression)
-    #     return buffer
-
-    # def read_buffer(self, buffer: io.BytesIO) -> T:
-    #     return load(buffer, compression=self.compression)
-
-    def write(self, file, data: T) -> io.BytesIO:
-        dump(data, file, compression=self.compression)
-
-    def read(self, file) -> T:
-        return load(file, compression=self.compression)
-
-    def file_info(self) -> tuple[str, str]:
-        return (
-            "application/octet-stream",
-            f"Pickle file using compression {self.compression}",
-        )
 
 
 @task()
 class Persister:
     def __init__(
         self,
+        data_container: Type[DataContainer],
         store=None,
-        storage_manager: None | StorageManager = None,
         stac_io: StacIO = None,
         selected_keys=None,
         force_update=False,
@@ -274,7 +248,7 @@ class Persister:
         if isinstance(store, str) or isinstance(store, Path):
             store = fsspec.get_mapper(store)
         self.store = store
-        self.storage_manager = storage_manager
+        self.data_container = data_container
 
         if cache is None:
             cache = LRUCache(10)
@@ -320,7 +294,7 @@ class Persister:
 
             if self.store is None:
                 return deskriptor
-            
+
             # while holding the mutex, we need to check if the file exists
             if data_path in self.store:
                 # remove previous node since we are going to load from disk
@@ -344,10 +318,10 @@ class Persister:
 
         return deskriptor
 
-    def compute(self, data: T | None = None, **deskriptor):
+    def compute(self, data: DataContainer | None = None, **deskriptor):
         if deskriptor["action"] == "passthrough":
             return data
-    
+
         if self.store is not None:
             self.store.dirfs.mkdirs("data/", exist_ok=True)
             data_path = f"data/{deskriptor['deskriptor_hash']}"
@@ -358,7 +332,7 @@ class Persister:
             return cached
         elif deskriptor["action"] == "load":
             f = self.store.dirfs.open(data_path)
-            data = self.storage_manager.read(f)
+            data = self.data_container.read(f)
 
             with self._mutex:
                 self.cache[data_path] = data
@@ -369,39 +343,27 @@ class Persister:
                 self.cache[data_path] = data
 
             if self.store is None:
-                return data 
-            
+                return data
+
             try:
                 # in this case we assume that the second element is additional metadata for the STAC item
-                if (
-                    isinstance(data, tuple)
-                    and len(data) == 2
-                    and isinstance(data[1], dict)
-                ):
-                    item_metadata = data[1]
-                    data = data[0]
-                else:
-                    item_metadata = {}
+                item_metadata = data.get_stac_metadata() or {}
 
                 # write to file
                 if isinstance(data, NodeFailedException):
-                    # buffer = self.storage_manager.write_buffer(data)
-                    # self.store["fail/" + deskriptor["deskriptor_hash"]] = buffer.getvalue()
                     self.store.dirfs.mkdirs("fail/", exist_ok=True)
                     with self.store.dirfs.open(
                         "fail/" + deskriptor["deskriptor_hash"], "wb"
                     ) as f:
-                        self.storage_manager.write(f, data)
+                        data.write(f)
 
                 else:
                     if isinstance(data, str):
                         raise RuntimeError(f"something wrong {data}")
 
-                    # buffer = self.storage_manager.write_buffer(data)
-                    # self.store[data_path] = buffer.getvalue()
                     try:
                         with self.store.dirfs.open(data_path, "wb") as f:
-                            self.storage_manager.write(f, data)
+                            data.write(f)
                     except Exception as e:
                         self.store.dirfs.rm(data_path)
                         raise e
@@ -467,12 +429,12 @@ class Persister:
 
         item = pystac.Item(**kwargs)
 
-        file_info = self.storage_manager.file_info()
+        file_info = self.data_container.file_info()
 
         asset = pystac.Asset(
             href=f"./../../data/{deskriptor['deskriptor_hash']}",
-            description=file_info[1],
-            media_type=file_info[0],
+            description=file_info.description,
+            media_type=file_info.media_type,
             roles=["data"],
         )
         item.add_asset(key="data", asset=asset)
@@ -494,12 +456,6 @@ class Persister:
             return o.isoformat()
         else:
             return str(o)
-
-
-try:
-    import xarray as xr
-except ImportError:
-    warnings.warn("Install xarray to use the default merge function of ChunkPersister")
 
 
 def merge_xarray(data, deskriptor):
@@ -530,6 +486,7 @@ def merge_xarray(data, deskriptor):
 class ChunkPersister:
     def __init__(
         self,
+        data_container: Type[DataContainer],
         store=None,
         filesystem=None,
         dim: str = "time",
@@ -540,8 +497,6 @@ class ChunkPersister:
         mode: str = "overlap",
         reference: dict = None,
         force_update=False,
-        merge_function=None,
-        storage_manager: StorageManager = PickleStorageManager(),
         collection_metadata: dict = {},
         save_metadata=False,
         use_memorycache=True,
@@ -552,14 +507,13 @@ class ChunkPersister:
 
         Args:
             store (_type_): _description_
+            data_container (Type[DataContainer]): Type of DataContainer used
             dim (str, optional): _description_. Defaults to "time".
             segment_slice (dict | Callable[..., dict], optional): A dictionary containing an entry for each dimension that should be chunked. Each entry is the respective chunk size given in the units of the expected dimension of the deskriptor. For example, for a time dimension you can use pd.Timedelta. Defaults to None.
             dataset_scope (dict | Callable[...,dict], optional): The extend of the chunking. If None, the incoming deskriptor will be used as the scope. If only selected dimensions are given as dataset_scope, the scope for the other dimensions will be choosen from the incoming deskriptor. Defaults to None.
             mode (str, optional): _description_. Defaults to "overlap".
             reference (dict, optional): _description_. Defaults to None.
             force_update (bool, optional): _description_. Defaults to False.
-            merge_function (_type_, optional): _description_. Defaults to None.
-            storage_manager (StorageManager, optional): Instance handling reading and writing of data. Defaults to PickleStorageManager.
             collection_metadata (dict, optional): Further kwargs for STAC collection. May contain keys ['id', 'title', 'keywords', 'license', 'links', 'providers']. For 'links' and 'providers' lists of either corresponding STAC objects or dicts that can be used as kwargs to construct them. Defaults to {}.
         """
         # if callable(classification_scope):
@@ -567,6 +521,8 @@ class ChunkPersister:
         #     classification_scope = None
         # else:
         #     self.classification_scope = None
+
+        self.data_container = data_container
 
         self.use_memorycache = use_memorycache
         if cache is None:
@@ -584,10 +540,6 @@ class ChunkPersister:
             segment_stride = None
         else:
             self.segment_stride = None
-
-        self.merge = merge_function
-        if self.merge is None:
-            self.merge = merge_xarray
 
         self.save_metadata = save_metadata
 
@@ -638,7 +590,6 @@ class ChunkPersister:
                     stac_io=self.stac_io,
                 )
 
-        self.storage_manager = storage_manager
         self.mutex = Lock()
 
     def __dask_tokenize__(self):
@@ -647,8 +598,8 @@ class ChunkPersister:
     def configure(self, deskriptor=None):
         rs = deskriptor["self"]
         if rs.get("bypass",False):
-            return deskriptor 
-        
+            return deskriptor
+
         def get_value(attr_name):
             # decide if we use the attribute provided in the deskriptor or
             # from a callback provided at initialization
@@ -690,12 +641,12 @@ class ChunkPersister:
             dict_update(segment_deskriptor, segment)
             cloned_deskriptors += [segment_deskriptor]
             cloned_persister = Persister(
+                data_container=self.data_container,
                 store=self.store,
-                storage_manager=self.storage_manager,
                 stac_io=self.stac_io,
                 global_lock=self.mutex,
                 save_metadata=self.save_metadata,
-                cache = self.cache,
+                cache=self.cache,
                 use_memorycache=self.use_memorycache
             )
             cloned_persister.dask_key_name = self.dask_key_name + "_persister"
@@ -720,7 +671,7 @@ class ChunkPersister:
 
         return deskriptor
 
-    def compute(self, *data, **deskriptor):
+    def compute(self, *data: DataContainer, **deskriptor) -> DataContainer:
         def unpack_list(inputlist):
             new_list = []
             for item in inputlist:
@@ -750,7 +701,7 @@ class ChunkPersister:
                     stac_io=self.stac_io,
                 )
 
-        section = self.merge(success, deskriptor)
+        section = self.data_container.merge(*success)
         return section
 
     def _process_collection_metadata(
