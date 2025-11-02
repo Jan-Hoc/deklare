@@ -457,30 +457,6 @@ class Persister:
             return str(o)
 
 
-def merge_xarray(data, deskriptor):
-    data = [d for d in data if d is not None]
-    if len(data) == 1:
-        merged_dataset = data[0]
-    else:
-        for i in range(len(data)):
-            if hasattr(data[i], "name") and (not data[i].name or data[i].name is None):
-                data[i].name = "data"
-        merged_dataset = xr.concat(data, dim="time")
-        if not merged_dataset.time.to_index().is_monotonic_increasing:
-            merged_dataset = merged_dataset.sortby("time")
-
-    # if hasattr(data[0], "name"):
-    #     merged_dataset = merged_dataset[data[0].name]
-    indexers = {}
-    for coord in merged_dataset.indexes:
-        if coord in deskriptor:
-            indexers[coord] = deskriptor[coord]
-    slices = indexers_to_slices(indexers)
-    section = merged_dataset.sel(slices)
-    section = exclusive_indexing(section, indexers)
-    return section
-
-
 @task()
 class ChunkPersister:
     def __init__(
@@ -670,7 +646,7 @@ class ChunkPersister:
 
         return deskriptor
 
-    def compute(self, *data: DataContainer, **deskriptor) -> DataContainer:
+    def compute(self, *data: DataContainer | NodeFailedException, **deskriptor) -> DataContainer:
         def unpack_list(inputlist):
             new_list = []
             for item in inputlist:
