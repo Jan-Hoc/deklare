@@ -217,9 +217,8 @@ class DataContainer(ABC):
         """
         pass
 
-    @classmethod
     @abstractmethod
-    def file_info(cls) -> MediaDescription:
+    def file_info(self) -> MediaDescription:
         """return media type and text describtion of file saved in `write` function
         media type should be registered in https://www.iana.org/assignments/media-types/media-types.xhtml e.g. `image/tiff`
         description should be human readable with information needed to read file
