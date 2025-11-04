@@ -369,7 +369,7 @@ class Persister:
                         raise e
 
                     if self.save_metadata:
-                        self._save_metadata(deskriptor, item_metadata)
+                        self._save_metadata(deskriptor, item_metadata, data.file_info())
 
             except Exception as e:
                 print("Error during Persister", repr(e))
@@ -417,19 +417,18 @@ class Persister:
 
         return deskriptor_hash
 
-    def _save_metadata(self, deskriptor: dict, item_metadata: dict) -> None:
+    def _save_metadata(self, deskriptor: dict, item_metadata: dict, file_info: MediaDescription) -> None:
         """saves metadata for given chunk using STAC (https://stacspec.org/)
 
         Args:
             deskriptor (dict): the deskriptor containing the temporal and spacial boundaries
-            item_metadata(dict): additional metadata passed by loader to save in STAC item
+            item_metadata (dict): additional metadata passed by loader to save in STAC item
+            file_info (MediaDescription): information about the saved file
         """
 
         kwargs = self.stac_io.gen_stac_item_kwargs(deskriptor, item_metadata)
 
         item = pystac.Item(**kwargs)
-
-        file_info = self.data_container.file_info()
 
         asset = pystac.Asset(
             href=f"./../../data/{deskriptor['deskriptor_hash']}",
