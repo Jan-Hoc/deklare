@@ -262,7 +262,7 @@ class Persister:
         self._mutex = Lock()
         self.save_metadata = save_metadata
 
-    def configure(self, deskriptor: T | None = None):
+    def configure(self, deskriptor: dict | None = None):
         deskriptor_hash = self.get_hash(deskriptor)
         data_path = f"data/{deskriptor_hash}"
 
