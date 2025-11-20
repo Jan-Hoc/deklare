@@ -33,7 +33,10 @@ def deklare_flow(flow, templateDeskriptor: Deskriptor = None):
 
     def query(deskriptor):
         if templateDeskriptor:
-            deskriptor = templateDeskriptor.from_dict(deskriptor).to_dict()
+            if isinstance(deskriptor,(tuple,list)):
+                deskriptor = [templateDeskriptor.from_dict(d).to_dict() for d in deskriptor]
+            else:
+                deskriptor = templateDeskriptor.from_dict(deskriptor).to_dict()
         return compute(flow_graph, deskriptor)
 
     if hasattr(flow, "__self__") and flow.__self__ is not None:

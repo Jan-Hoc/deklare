@@ -197,14 +197,18 @@ def configuration(
     work = list(set(flatten(keys)))
     # create a deepcopy, otherwise we might overwrite deskriptors and falsify its usage outside of this function
     # deskriptor = deepcopy(deskriptor)
-    if isinstance(deskriptor, list):
+    clone_input = False
+    if isinstance(deskriptor, list) and len(work)==1:
+        deskriptors = {k: deskriptor for k in work}
+        clone_input = True
+    elif isinstance(deskriptor, list) and len(work)!=1:
         # deskriptor = [NestedFrozenDict(r) for r in deskriptor if r]
-        deskriptor = [r for r in deskriptor if r]
+        deskriptor = [r for r in deskriptor if r]            
         if len(deskriptor) != len(work):
             raise RuntimeError(
-                "When passing multiple deskriptor items "
+                "When passing multiple deskriptor items and the flow has multiple outputs"
                 "The number of deskriptor items must be same "
-                "as the number of keys"
+                "as the number of keys/outputs"
             )
 
         # For each output node different deskriptor has been provided
@@ -214,7 +218,6 @@ def configuration(
         # Every output node receives the same deskriptor
         deskriptors = {k: [deskriptor] for k in work}
 
-    remove = {k: False for k in work}
     input_deskriptors = {}
     # We will create a new graph with the configured nodes of the old graph
     # out_keys keeps track of the keys we have configured and
@@ -230,6 +233,82 @@ def configuration(
         # (apply, func, args, kwargs)
         if dsk_dict[k][0] is not apply:
             dsk_dict[k] = (apply, dsk_dict[k][0], list(dsk_dict[k][1:]), {})
+
+    if clone_input:
+        k =  next(iter(work))
+        clone_dependencies = deskriptor
+        current_deps = get_dependencies(dsk_dict, k, as_list=True)
+        work = {}
+        keys = []
+        for clone_id, deskriptor in enumerate(clone_dependencies):
+            k_in_keys = []
+            clone_k = generate_clone_key("fakeit", k, clone_id)
+            work[clone_k] = True
+            cloned_cd_node = copy(dsk_dict[k])
+            dsk_dict[clone_k] = cloned_cd_node
+            normalize_node(clone_k)
+
+            to_clone_keys = dsk_dict[clone_k][DATA]
+            if not isinstance(to_clone_keys, list):
+                to_clone_keys = [to_clone_keys]
+
+            for to_clone_key in to_clone_keys:
+                if to_clone_key is None:
+                    k_in_keys.append(None)
+                else:
+                    k_in_keys.append(
+                        generate_clone_key(clone_k, to_clone_key, clone_id)
+                    )
+
+            for i, d in enumerate(current_deps):
+                clone_work = [d]
+
+                d = generate_clone_key(clone_k, d, clone_id)
+                while clone_work:
+                    new_clone_work = []
+                    for cd in clone_work:
+                        clone_d = generate_clone_key(clone_k, cd, clone_id)
+
+                        # update_key_in_config(deskriptor,cd,clone_d)
+                        # TODO: do we need to reset the dask_key_name of each
+                        #       of each cloned node?
+
+                        normalize_node(cd)
+
+                        cloned_cd_node = copy(dsk_dict[cd])
+
+                        # if contains data as input
+                        to_clone_keys = cloned_cd_node[DATA]
+                        if not isinstance(to_clone_keys, list):
+                            to_clone_keys = [to_clone_keys]
+                        cd_in_keys = []
+                        for to_clone_key in to_clone_keys:
+                            if to_clone_key is None:
+                                cd_in_keys.append(None)
+                            else:
+                                cd_in_keys.append(
+                                    generate_clone_key(
+                                        clone_k, to_clone_key, clone_id
+                                    )
+                                )
+                        # if len(cd_in_keys) == 1:
+                        #     cd_in_keys = cd_in_keys[0]
+                        nd = list(cloned_cd_node)
+                        nd[DATA] = cd_in_keys
+                        cloned_cd_node = tuple(nd)
+                        dsk_dict[clone_d] = cloned_cd_node
+                        new_deps = get_dependencies(dsk_dict, cd, as_list=True)
+                        new_clone_work += new_deps
+                    clone_work = new_clone_work
+            dsk_k = list(dsk_dict[clone_k])
+            dsk_k[DATA] = k_in_keys
+            dsk_k[DESKRIPTOR] = deskriptor
+            dsk_dict[clone_k] = tuple(dsk_k)
+
+            deskriptors[clone_k] = [deskriptor]
+            keys += [clone_k]
+
+    remove = {k: False for k in work}
 
     while work:
         # new_work = []
