@@ -354,9 +354,10 @@ class Persister:
 
         if deskriptor["action"] == "load_from_cache":
             with self._mutex:
-                cached = self.cache[data_path]
-            return cached
-        elif deskriptor["action"] == "load":
+                if data_path in self.cache:
+                    cached = self.cache[data_path]
+                    return cached
+        if deskriptor["action"] == "load" or deskriptor["action"] == "load_from_cache":
             f = self.store.dirfs.open(data_path)
             data = self.storage_manager.read(f)
 
