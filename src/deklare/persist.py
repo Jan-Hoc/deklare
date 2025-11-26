@@ -322,7 +322,7 @@ class Persister:
                 return deskriptor
             
             # while holding the mutex, we need to check if the file exists
-            if data_path in self.store:
+            if data_path in self.store and self.store.dirfs.info(data_path).get("size",0) > 0:
                 # remove previous node since we are going to load from disk
                 deskriptor["remove_dependencies"] = True
 
