@@ -35,7 +35,7 @@ def base_name(name: str) -> str:
 
 
 # ToDo: Doc strings
-# ToDo: more precise types
+# ToDo: fix deskriptor types (then also in doc strings)
 
 FUNCTION = 1
 DATA = 2
@@ -568,7 +568,7 @@ def optimize(
     return collection
 
 
-def compute(graph: Graph, deskriptor: dict) -> tuple:
+def compute(graph: Graph, deskriptor: dict) -> Any:  # noqa: ANN401
     configured_graph = configuration(graph, deskriptor)
 
     computed_result = dask.compute(configured_graph)[0]

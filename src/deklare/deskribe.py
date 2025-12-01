@@ -16,46 +16,49 @@ limitations under the License."""
 from __future__ import annotations
 
 import datetime
-from typing import Annotated, Any, Dict, Generic, TypeVar, get_args
+from typing import Annotated, Any, Generic, TypeVar, get_args
 
 import numpy as np
 import pandas as pd
 from pandas.core.tools.datetimes import DatetimeScalar
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydantic.functional_validators import AfterValidator
 
-# ToDo: Doc strings
-# ToDo: more precise types
+# ToDo: fix deskriptor types (then also in doc strings)
 
 
-def to_datetime(v: DatetimeScalar) -> pd.Timestamp:
+def _to_datetime(v: DatetimeScalar) -> pd.Timestamp:
+    """helper function to create DateTimeType"""
     return pd.to_datetime(v, utc=True).tz_localize(None)
 
 
-T = TypeVar("T", str, datetime.datetime, datetime.date, int, float, np.datetime64)
+DatetimeT = TypeVar("DatetimeT", int, float, str, datetime.date, datetime.datetime, np.datetime64)
 
 
-DateTimeType = Annotated[T, AfterValidator(to_datetime)]
+DateTimeType = Annotated[DatetimeT, AfterValidator(_to_datetime)]
 
 
 T = TypeVar("T", int, float, DateTimeType)
 
 
 class Range(BaseModel, Generic[T]):
-    start: T  # type: ignore
-    end: T  # type: ignore
+    start: T
+    end: T
 
 
 DatetimeRange = Range[DateTimeType]
 
 
-def transform_to_nested(input_dict: dict, split: str = ".") -> dict:
-    """
-    Transform the flat JSON keys with dots (split) into nested JSON keys.
+def _transform_to_nested(input_dict: dict, separator: str = ".") -> dict:
+    """transform the flat JSON keys with dots (split) into nested JSON keys
+
+    Args:
+        input_dict (dict): dict with possibly flattened JSON keys
+        separator (str): seperator used to flatten keys
     """
     transformed = {}
     for key, value in input_dict.items():
-        parts = key.split(split)
+        parts = key.split(separator)
         current = transformed
         for part in parts[:-1]:
             current = current.setdefault(part, {})
@@ -63,15 +66,31 @@ def transform_to_nested(input_dict: dict, split: str = ".") -> dict:
     return transformed
 
 
+# ToDo: fix deskriptor class to also accept dicts
 class Deskriptor(BaseModel, validate_assignment=True):
-    config: dict[str, Any] = {}
+    """Deskriptor to represent queries for data
+
+    Attributes:
+        config (dict[str, Any]): config of deskriptor
+    """
+
+    config: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
     @model_validator(mode="before")
     def dynamic_validator(cls, values: dict[str, Any]) -> dict[str, Any]:
-        kwargs = {}
+        """validate and transform input data before model instantiation
+        converts nested dictionaries into `DatetimeRange` or `Range` instances if required
 
-        values = transform_to_nested(values)
+        Args:
+            values (dict[str, Any]): raw input values to validate
+
+        Returns:
+            dict[str, Any]: validated data
+        """
+
+        kwargs = {}
+        values = _transform_to_nested(values)
 
         for key, value in values.items():
             if key in cls.model_fields:
@@ -82,9 +101,18 @@ class Deskriptor(BaseModel, validate_assignment=True):
                     kwargs[key] = Range(**value)
                 else:
                     kwargs[key] = value
+
         return kwargs
 
-    def to_dict(self, remove_none=True) -> Dict[str, Any]:
+    def to_dict(self, *, remove_none: bool = True) -> dict[str, Any]:
+        """transforms instance into dict representation
+
+        Args:
+            remove_none (bool): ignores None values if True. defaults to True
+
+        Returns:
+            dict[str, Any]: dictionary containing data in instance
+        """
         result = {}
         for field_name, field_value in self:
             if remove_none and field_value is None:
@@ -95,17 +123,30 @@ class Deskriptor(BaseModel, validate_assignment=True):
                 result[field_name] = field_value
         return result
 
-    def update(self, deskriptor: Deskriptor) -> None:
-        self.config.update(deskriptor.config)
+    def update(self, other: Deskriptor) -> None:
+        """updates instance given other deskriptor
+
+        Args:
+            other (Deskriptor): deskriptor to use to update instance
+        """
+        self.config.update(other.config)
 
     def get(self, key: str, default: Any) -> Any:  # noqa: ANN401
         return self.config.get(key, default)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> Deskriptor:
+    def from_dict(cls, data: dict[str, Any]) -> Deskriptor:
+        """create deskriptor from data
+
+        Args:
+            data (dict[str, Any]): data to use to create deskriptor
+
+        Returns:
+            Deskriptor: containing data
+        """
         kwargs = {}
 
-        data = transform_to_nested(data)
+        data = _transform_to_nested(data)
 
         for key, value in data.items():
             if key in cls.model_fields:
@@ -137,7 +178,7 @@ class Deskriptor(BaseModel, validate_assignment=True):
         config_keys = deskriptor["config"]
 
         if "config" not in config_keys:
-            deskriptor
+            return deskriptor
 
         config_keys = config_keys["config"]
 

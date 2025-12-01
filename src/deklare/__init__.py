@@ -15,25 +15,37 @@ limitations under the License."""
 
 import importlib
 import inspect
-import yaml
 import os
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
+
+import yaml
 
 from .core import init_flow_graph, task
 from .deskribe import Deskriptor
 from .graph import Node, compute
 from .persist import ChunkPersister, Persister
 
-# ToDo: Doc strings
-# ToDo: more precise types
+# ToDo: fix deskriptor types (then also in doc strings)
 
 
 def deklare_flow(
-    flow,
+    flow: Callable,
     template_deskriptor: Deskriptor | None = None,
     config_path: Path | str | None = None,
-):
+) -> Callable:
+    """creates a deklare flow to use to query data for given deskriptors using dask
+
+    Args:
+        flow (Callable): flow to be converted into a dask task graph
+        template_deskriptor (Deskriptor | None): template deskriptor for validation of query deskriptors
+            defaults to None
+        config_path (Path | str | None): path to a config file to replace values in query deskriptors
+            defaults to None
+
+    Returns:
+        Callable: Callable with attribute `query` to execute dask task graph for actual function
+    """
     flow_graph = init_flow_graph(flow)
 
     config_deskriptor = None
@@ -44,18 +56,18 @@ def deklare_flow(
         with open(config_path, "r") as f:
             config_deskriptor = yaml.safe_load(f)
 
-    def deklare_flow_function(self, deskriptor):
-        return compute(flow_graph, deskriptor)
-
-    def query_class(self, deskriptor):
+    def query_class(self, deskriptor: dict) -> Any:  # noqa: ANN001, ANN401, ARG001
+        """wrapper for query function for classes with self attribute"""
         return query(deskriptor)
 
-    def query(deskriptor):
+    def query(deskriptor: dict) -> Any:  # noqa: ANN401
+        """query function to get data corresponding to deskriptor"""
         if config_deskriptor:
             deskriptor = Deskriptor.update_from_config_dict(deskriptor, config_deskriptor)
 
         if template_deskriptor:
             deskriptor = template_deskriptor.from_dict(deskriptor).to_dict()
+
         return compute(flow_graph, deskriptor)
 
     if hasattr(flow, "__self__") and flow.__self__ is not None:
@@ -66,22 +78,30 @@ def deklare_flow(
     return flow
 
 
-def is_module_function_or_class(_module: importlib.ModuleType) -> Callable:
-    def predicate(member: object) -> bool:
-        # TODO: should we also check for member.__name__ in module.__name__?
-        return inspect.isfunction(member) or inspect.isclass(member)
-
-    return predicate
-
-
 def deklare_module(
     module: str | importlib.ModuleType,
-    flows: str | set | None = None,
-    names: dict | None = None,
-    external_tasks: list | None = None,
-    ignore: list | None = None,
+    flows: str | set[str] | None = None,
+    names: dict[str, str] | None = None,
+    external_tasks: list[str] | None = None,
+    ignore: list[str] | None = None,
     no_wrap: bool = False,
-) -> tuple:
+) -> tuple[importlib.ModuleType, *tuple[Callable, ...]]:
+    """
+    deklare flows in a module and recursively handle dependencies
+
+    Args:
+        module (str | importlib.ModuleType): Module object or module name to process
+        flows (str | set): name(s) of functions/classes to treat as flows. defaults to None
+        names (dict[str, str]): dict mapping member names to task names. defaults to None
+        external_tasks (list[str]): list of external task names to include. defaults to None
+        ignore (list[str]): list of member names to ignore entirely. defaults to None
+        no_wrap (bool): if True, flows are not wrapped with `deklare_flow`. defaults to False
+
+    Returns:
+        tuple[importlib.ModuleType, *tuple[Callable, ...]]:
+            - The module object
+            - All flow instances (possibly wrapped) in order
+    """
     names = names or {}
     external_tasks = external_tasks or []
     ignore = ignore or []
@@ -116,11 +136,51 @@ def deklare_module(
     return tuple([module] + list(flow_instances.values()))
 
 
-def _init_modules(module: importlib.ModuleType, flows: set, ignore: list, names: dict, external_tasks: list) -> tuple:
+def _is_module_function_or_class(_module: importlib.ModuleType) -> Callable:
+    """returns a predicate function to check if a member of a module is a function or a class
+
+    Args:
+        _module (importlib.ModuleType): module to check members against
+
+    Returns:
+        Callable: returns True if the member is a function or a class, else False
+    """
+
+    def predicate(member: object) -> bool:
+        # TODO: should we also check for member.__name__ in module.__name__?
+        return inspect.isfunction(member) or inspect.isclass(member)
+
+    return predicate
+
+
+def _init_modules(
+    module: importlib.ModuleType, flows: set[str], ignore: list[str], names: dict[str, str], external_tasks: list[str]
+) -> tuple[dict[str, Callable], dict[str, Callable]]:
+    """
+    initialize module flows and handle dependencies.
+
+    Iterates over all functions and classes in a module and separates:
+    - `flow_instances`: functions/classes that match the `flows` set
+    - `dependency_modules`: functions/classes from other modules required as dependencies
+
+    Members not in `flows` but not ignored are wrapped with `task()` decorator.
+
+    Args:
+        module (importlib.ModuleType): module to inspect
+        flows (set[str]): set of member names to treat as flows
+        ignore (list[str]): ist of member names to ignore
+        names (dict[str, str]): mapping of member names to task names
+        external_tasks (list[str]): list of externally defined tasks to include
+
+    Returns:
+        tuple[dict[str, Callable], dict[str, Callable]]:
+            - flow_instances: mapping flow names to members
+            - dependency_modules: mapping module names to members that are dependencies
+    """
     flow_instances, dependency_modules = {}, {}
 
     # Iterate over all functions defined in the module
-    for name, func_or_cls in inspect.getmembers(module, predicate=is_module_function_or_class(module)):
+    for name, func_or_cls in inspect.getmembers(module, predicate=_is_module_function_or_class(module)):
         if name in flows:
             # if member direct member of the module, we add it to the return flows
             # if not, it needs to be loaded appropriately from it's original module

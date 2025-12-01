@@ -13,43 +13,79 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License."""
 
+from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from typing import IO, Any, Iterable, NamedTuple, Self, TypeVar
+
+import fsspec
+import numpy as np
 import pystac
 import xarray as xr
-from datetime import datetime, timezone
-from typing import NamedTuple, Self, IO
-from abc import ABC, abstractmethod
 from shapely.geometry import Polygon, mapping
+
+Index = TypeVar(
+    "Index",
+    int,
+    slice,
+    float,
+    str,
+    np.datetime64,
+    Iterable[int],
+    Iterable[float],
+    Iterable[str],
+    Iterable[np.datetime64],
+    dict[str, Any],
+)
+
+# ToDo: fix deskriptor types (then also in doc strings)
 
 
 class MediaDescription(NamedTuple):
+    """more precise return type to avoid confusion
+
+    Attributes:
+        media_type (str): should be in https://www.iana.org/assignments/media-types/media-types.xhtml, e.g. `image/tiff`
+        description (str): information needed to read file in human readable format
+    """
+
     media_type: str
     description: str
 
 
 class StacIO(pystac.StacIO):
-    def __init__(self, store):
+    """subclass of pystac.StacIO to properly handle metadata from deskriptors and work with FSMap
+
+    Attributes:
+        store (fsspec.FSMap): FSMap used to store data using fsspec
+    """
+
+    store: fsspec.FSMap
+
+    def __init__(self, store: fsspec.FSMap) -> None:
         self.store = store
 
-    def read_text(self, source: pystac.utils.HREF, *args, **kwargs) -> str:
-        """Reads the data at `source` stored in the store
+    def read_text(self, source: pystac.utils.HREF, *args, **kwargs) -> str:  # noqa: ANN002, ANN003, ARG002
+        """reads the data at `source` stored in the store
 
         Args:
-            source : The source to read from.
+            source : source to read from
 
         Returns:
-            str: The text contained in the file at the location specified by the uri.
+            str: text contained in file at location specified by the URI
         """
         str_src = str(source)
+        # needed to avoid issues with absolute paths that are not properly handled in pystac
         if str_src.startswith("/") and len(str_src) > 1:
             str_src = str_src[1:]
+
         return self.store[str_src].decode()
 
-    def write_text(self, dest: pystac.utils.HREF, txt: str, *args, **kwargs) -> None:
+    def write_text(self, dest: pystac.utils.HREF, txt: str, *args, **kwargs) -> None:  # noqa: ANN002, ANN003, ARG002
         """writes the data of `txt` into the store to `dest`
 
         Args:
-            dest : The destination to write to.
-            txt : The text to write.
+            dest :destination to write to
+            txt : the text to write into destination
         """
         str_dest = str(dest)
         if str_dest.startswith("/") and len(str_dest) > 1:
@@ -61,14 +97,14 @@ class StacIO(pystac.StacIO):
         """generates metadata for the stac item for a deskriptor
 
         Args:
-            deskriptor (dict): deskriptor describing
-            item_metadata (dict): _description_
+            deskriptor (dict): deskriptor describing range of data
+            item_metadata (dict): additional metadata for item
 
         Raises:
-            RuntimeError: _description_
+            RuntimeError: if deskriptor does not match expected format to generate metadata
 
         Returns:
-            dict: _description_
+            dict: stac metadata from deskriptor and item_metadata
         """
         if (
             "longitude" not in deskriptor
@@ -80,11 +116,8 @@ class StacIO(pystac.StacIO):
             or "time" not in deskriptor
             or "variable" not in deskriptor
         ):
-            raise RuntimeError(
-                "Given deskriptor does not match required metadata format"
-            )
+            raise RuntimeError("Given deskriptor does not match required metadata format")
 
-        id = deskriptor["deskriptor_hash"]
         bbox = [
             deskriptor["longitude"]["start"],
             deskriptor["latitude"]["end"],
@@ -107,7 +140,7 @@ class StacIO(pystac.StacIO):
         variables = deskriptor["variable"]
 
         kwargs = {
-            "id": id,
+            "id": deskriptor["deskriptor_hash"],
             "geometry": footprint,
             "bbox": bbox,
             "datetime": None,
@@ -130,8 +163,11 @@ class StacIO(pystac.StacIO):
 
         return kwargs
 
-    def _gen_description(self, deskriptor) -> str:
+    def _gen_description(self, deskriptor: dict) -> str:
         """generate human readable description for STAC Item of chunk
+
+        Args:
+            deskriptor (dict): deskriptor defining range of data
 
         Returns:
             str: STAC Item description
@@ -154,23 +190,23 @@ class StacIO(pystac.StacIO):
 class DataContainer(ABC):
     @abstractmethod
     def write(self, file: IO) -> None:
-        """Takes the data and writes it to the file
+        """takes the data and writes it to the file
 
         Args:
-            file (IO): file-like object to save data from itself too
+            file (IO): file-like object to save data from itself to
         """
         pass
 
     @classmethod
     @abstractmethod
     def read(cls, file: IO) -> Self:
-        """Reads the data in file and creates new data container from it
+        """reads the data in file and creates new data container from it
 
         Args:
             file (IO): file-like object containing saved data
 
         Returns:
-            DataContainer: Container containing data saved in file
+            DataContainer: container containing data saved in file
         """
         pass
 
@@ -200,27 +236,31 @@ class DataContainer(ABC):
     @abstractmethod
     def file_info(self) -> MediaDescription:
         """return media type and text describtion of file saved in `write` function
-        media type should be registered in https://www.iana.org/assignments/media-types/media-types.xhtml e.g. `image/tiff`
-        description should be human readable with information needed to read file
 
         Returns:
-            MediaDescription: (media type, description)
+            MediaDescription: description of saved file
         """
         pass
 
 
 class XArrayContainer(DataContainer):
+    """example DataContainer to handle XArray Datasets
+
+    Attributes:
+        data (xr.Dataset): data wrapped in container
+    """
+
     data: xr.Dataset
 
-    def __init__(self, data: xr.Dataset):
+    def __init__(self, data: xr.Dataset) -> None:
         super().__init__()
         self.data = data.copy()
 
-    def __getitem__(self, index) -> xr.DataArray | xr.Dataset:
+    def __getitem__(self, index: Index) -> xr.DataArray | xr.Dataset:
         """function to make XArrayContainer indexable
 
         Args:
-            index: index to retrieve data from container
+            index (Index): index to retrieve data from container
 
         Returns:
             xr.DataArray | xr.Dataset: data corresponding to index
@@ -228,22 +268,22 @@ class XArrayContainer(DataContainer):
         return self.data[index]
 
     def write(self, file: IO) -> None:
-        """Takes the data and writes it to the file
+        """takes the data and writes it to the given file in netCDF format
 
         Args:
-            file (IO): file-like object to save data from itself too
+            file (IO): file-like object to which netCDF data is saved
         """
         self.data.to_netcdf(file)
 
     @classmethod
     def read(cls, file: IO) -> Self:
-        """Reads the data in file and creates new data container from it
+        """reads the data in file and creates new data container from it
 
         Args:
-            file (IO): file-like object containing saved data
+            file (IO): file-like object containing saved data in netCDF format
 
         Returns:
-            XArrayContainer: Container containing data saved in file
+            XArrayContainer: container containing data saved in file
         """
         return cls(xr.open_dataset(file))
 
@@ -251,7 +291,7 @@ class XArrayContainer(DataContainer):
         """optionally returns STAC metadata for the contained data
 
         returns:
-            dict | None: dict containing STAC metadata or None for no metadata
+            dict | None: dict containing STAC metadata for xarray dataset
         """
         bbox = None
         if {"lat", "lon"}.issubset(self.data):
@@ -312,11 +352,9 @@ class XArrayContainer(DataContainer):
 
     def file_info(self) -> MediaDescription:
         """returns media type and text description of file saved in `write` function, which is netCDF file
-        media type should be registered in https://www.iana.org/assignments/media-types/media-types.xhtml e.g. `image/tiff`
-        description should be human readable with information needed to read file
 
         Returns:
-            MediaDescription: (media type, description)
+            MediaDescription: description of saved format
         """
         return MediaDescription(
             "application/octet-stream",

@@ -14,32 +14,28 @@ See the License for the specific language governing permissions and
 limitations under the License."""
 
 import json
-import fsspec
-
 from copy import copy, deepcopy
 from pathlib import Path
 from threading import Lock
-from typing import Callable, Type
+from typing import Any, Callable, Iterable, Type
 
-from cachetools import LRUCache
+import fsspec
+import pystac
+from cachetools import Cache, LRUCache
 
 # TODO: can we implement our own hash function for deskriptors to reduce dependency on dask?
 from dask.base import tokenize
-from typing import Any, Iterable
-
-import pystac
-from cachetools import Cache
 
 from .core import task
+from .data_io import DataContainer, MediaDescription, StacIO
 from .utils import (
     NodeFailedError,
     dict_update,
     get_segments,
 )
-from .data_io import StacIO, DataContainer, MediaDescription
 
 # ToDo: Doc strings
-# ToDo: more precise types
+# ToDo: fix deskriptor types (then also in doc strings)
 
 
 @task()
@@ -127,7 +123,8 @@ class Persister:
 
         return deskriptor
 
-    def compute(self, data: DataContainer | None = None, **deskriptor):
+    # ToDo: Doc String and Make simpler
+    def compute(self, data: DataContainer | None = None, **deskriptor: dict) -> DataContainer:  # noqa: C901
         if deskriptor["action"] == "passthrough":
             return data
 
@@ -180,7 +177,7 @@ class Persister:
                         self._save_metadata(deskriptor, item_metadata, data.file_info())
 
             except Exception as e:
-                print("Error during Persister", repr(e))
+                raise NodeFailedError("Error during Persister") from e
 
             return data
         else:
@@ -263,6 +260,7 @@ def _string_timestamp(o: object) -> str:
         return str(o)
 
 
+# ToDo: Fix doc string
 @task()
 class ChunkPersister:
     def __init__(
@@ -277,7 +275,6 @@ class ChunkPersister:
         mode: str = "overlap",
         reference: dict = None,
         force_update: bool = False,
-        merge_function: Callable | None = None,
         collection_metadata: dict | None = None,
         save_metadata: bool = False,
         use_memorycache: bool = True,
@@ -287,15 +284,22 @@ class ChunkPersister:
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
 
         Args:
-            store (_type_): _description_
             data_container (Type[DataContainer]): Type of DataContainer used
+            store (fsspec.FSMap): store used for caching
             dim (str, optional): _description_. Defaults to "time".
-            segment_slice (dict | Callable[..., dict], optional): A dictionary containing an entry for each dimension that should be chunked. Each entry is the respective chunk size given in the units of the expected dimension of the deskriptor. For example, for a time dimension you can use pd.Timedelta. Defaults to None.
-            dataset_scope (dict | Callable[...,dict], optional): The extend of the chunking. If None, the incoming deskriptor will be used as the scope. If only selected dimensions are given as dataset_scope, the scope for the other dimensions will be choosen from the incoming deskriptor. Defaults to None.
+            segment_slice (dict | Callable[..., dict], optional): dict containing an entry for each chunked dimension
+                each entry is the respective chunk size given in the units of the expected dimension of the deskriptor.
+                e.g. for a time dimension you can use pd.Timedelta. Defaults to None.
+            dataset_scope (dict | Callable[...,dict], optional): The extend of the chunking.
+                If None, the incoming deskriptor will be used as the scope. If only select dimensions are given,
+                the scope for the other dimensions will be choosen from the incoming deskriptor. Defaults to None.
             mode (str, optional): _description_. Defaults to "overlap".
             reference (dict, optional): _description_. Defaults to None.
             force_update (bool, optional): _description_. Defaults to False.
-            collection_metadata (dict, optional): Further kwargs for STAC collection. May contain keys ['id', 'title', 'keywords', 'license', 'links', 'providers']. For 'links' and 'providers' lists of either corresponding STAC objects or dicts that can be used as kwargs to construct them. Defaults to {}.
+            collection_metadata (dict, optional): Further kwargs for STAC collection.
+                May contain keys ['id', 'title', 'keywords', 'license', 'links', 'providers'].
+                For 'links' and 'providers' lists of either corresponding STAC objects or dicts to construct them.
+                Defaults to {}.
         """
         self.data_container = data_container
 
@@ -432,11 +436,11 @@ class ChunkPersister:
 
         return deskriptor
 
-    def compute(self, *data: DataContainer | NodeFailedError, **deskriptor) -> DataContainer:
-        def unpack_list(inputlist):
+    def compute(self, *data: DataContainer | NodeFailedError, **deskriptor: dict) -> DataContainer:  # noqa: ARG002
+        def unpack_list(inputlist: Iterable[NodeFailedError | DataContainer] | NodeFailedError | DataContainer) -> list:
             new_list = []
             for item in inputlist:
-                if isinstance(item, (tuple, list)):
+                if isinstance(item, Iterable):
                     new_list += unpack_list(item)
                 else:
                     new_list += [item]

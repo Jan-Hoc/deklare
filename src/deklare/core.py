@@ -24,13 +24,13 @@ from uuid import uuid4
 import dask
 import dask.delayed
 from dask.delayed import Delayed
+from dask.typing import Graph
 
 KEY_SEP = "+"
 PROTECTED_DESKRIPTOR_KEYS = ["self", "config"]
 PROTECTED_CONFIG_KEYS = ["global", "types", "keys"]
 
-# ToDo: Doc strings
-# ToDo: more precise types
+# ToDo: fix deskriptor types (then also in doc strings)
 
 
 class FlowContext:
@@ -87,6 +87,13 @@ is_enabled = False
 
 
 class Node(object):
+    """node of dask task graph
+
+    Attributes:
+        _name (str | None): name of Node
+        config (dict): configuration of Node
+    """
+
     _name: str | None
     config: dict
 
@@ -123,41 +130,39 @@ class Node(object):
 
     def configure(self, deskriptor: dict) -> dict:
         """Before a task graph is executed each node is configured.
-            The deskriptor is propagated from the end to the beginning
-            of the DAG and each nodes "configure" routine is called.
-            The deskriptor can be updated to reflect additional requirements,
-            The return value gets passed to predecessors.
+        The deskriptor is propagated from the end to the beginning
+        of the DAG and each nodes "configure" routine is called.
+        The deskriptor can be updated to reflect additional requirements,
+        The return value gets passed to predecessors.
 
-            Essentially the following question must be answered within the
-            nodes configure function:
-            What do I need to fulfil the deskriptor of my successor? Either the node
-            can provide what is required or the deskriptor is passed through to
-            predecessors in hope they can fulfil the deskriptor.
+        Essentially the following question must be answered within the
+        nodes configure function:
+        What do I need to fulfil the deskriptor of my successor? Either the node
+        can provide what is required or the deskriptor is passed through to
+        predecessors in hope they can fulfil the deskriptor.
 
-            Here, you must not configure the internal parameters of the
-            Node otherwise it would not be thread-safe. You can however
-            introduce a new key 'requires_deskriptor' in the deskriptor being
-            returned. This deskriptor will then be passed as an argument
-            to the __call__ function.
+        Here, you must not configure the internal parameters of the
+        Node otherwise it would not be thread-safe. You can however
+        introduce a new key 'requires_deskriptor' in the deskriptor being
+        returned. This deskriptor will then be passed as an argument
+        to the __call__ function.
 
-            Best practice is to configure the Node on initialization with
-            runtime independent configurations and define all runtime
-            dependant configurations here.
+        Best practice is to configure the Node on initialization with
+        runtime independent configurations and define all runtime
+        dependant configurations here.
 
         Args:
             deskriptor (dict): deskriptor to merge with own config.
 
-
         Returns:
-            dict -- The (updated) deskriptor. If updated, modifications
-                    must be made on a copy of the input. The return value
-                    must be a dictionary.
-                    If multiple deskriptors are input to this function they
-                    must be merged.
-                    If nothing needs to be deskriptored an empty dictionary
-                    can be return. This removes all dependencies of this
-                    node from the task graph.
-
+            dict: The (updated) deskriptor. If updated, modifications
+                  must be made on a copy of the input. The return value
+                  must be a dictionary.
+                  If multiple deskriptors are input to this function they
+                  must be merged.
+                  If nothing needs to be deskriptored an empty dictionary
+                  can be return. This removes all dependencies of this
+                  node from the task graph.
         """
         merged_deskriptor = self.merge_config(deskriptor)
 
@@ -167,6 +172,24 @@ class Node(object):
         return merged_deskriptor
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        """
+        execute flow, possibly within a dask delayed context
+
+        Args:
+            *args (Any): positional arguments to pass to the underlying compute function
+            **kwargs (Any): keyword arguments, may optionally include special args:
+                - name (str): name for the task. must not contain `KEY_SEP`
+                - context (FlowContext): execution context
+                - deskriptor (dict) : configuration dictionary to merge with the instance's config
+
+        Returns:
+            Any: result of computation. if `context.is_enabled()`, returns corresponding `dask.delayed` object
+                 else, returns the immediate result of `self.compute(*args, **kwargs)`
+
+        Raises:
+            RuntimeError: If kwargs["name"] contains the reserved separator `KEY_SEP`
+        """
+
         name = kwargs.get("name", None)
         context = kwargs.get("context", None)
         if name is not None and KEY_SEP in name:
@@ -195,6 +218,15 @@ class Node(object):
             return forward_func(*args, **kwargs)
 
     def _copy_deskriptor(self, deskriptor: dict) -> dict:
+        """copies deskriptor with config of instance under "self" if present
+        ignores PROTECTED_DESKRIPTOR_KEYS
+
+        Args:
+            deskriptor (dict): initial deskriptor to copy
+
+        Returns:
+            dict: copied and udpated deskriptor
+        """
         new_deskriptor = deepcopy(deskriptor)
 
         new_deskriptor["self"] = {}
@@ -208,6 +240,12 @@ class Node(object):
         return new_deskriptor
 
     def _update_deskriptor_config(self, old_deskriptor: dict, new_deskriptor: dict) -> None:
+        """Merge configuration from an old deskriptor into a new deskriptor's `self` parameters.
+
+        Args:
+            old_deskriptor (dict): old deskriptor values to update new deskriptor
+            new_deskriptor (dict): new deskriptor to update `self` parameters
+        """
         assert isinstance(new_deskriptor["self"], dict)  # for type hints, is set to dict in _copy_deskriptor
 
         if old_deskriptor.get("config", None) is not None:
@@ -245,7 +283,17 @@ class Node(object):
 
 
 # ToDo: fix types
-def init_flow_graph(flow: type | Callable):
+def init_flow_graph(flow: Callable) -> Graph:
+    """initialises dask task graph from flow
+    parts of the callstack of flow not decorated with @task or of type Node will be treated like normal call
+    parts that are decorated with @task or of type node will be turned into dask.Delayed objects
+
+    Args:
+        flow (Callable): Callable computing desired result to be wrapped in task graph
+
+    Returns:
+        Graph: dask task graph for flow
+    """
     if inspect.isclass(flow):
         flow = flow()
 
@@ -256,9 +304,15 @@ def init_flow_graph(flow: type | Callable):
 
 
 def task(name: str | None = None, context: FlowContext | None = None) -> Callable:
+    """decorator for functions and classes to signalise that it should be made into a dask.Delayed object
+
+    Args:
+        name (str | None): name of resulting task graph node. defaults to None
+        context (FlowContext | None): context for that flow. defaults to None
+    """
     context = context or FlowContext
 
-    def decorator_task(func_or_cls: type | Callable) -> type | Callable:
+    def decorator_task(func_or_cls: Callable) -> Callable:
         return (
             _wrap_class(func_or_cls, name)
             if inspect.isclass(func_or_cls)
@@ -269,6 +323,7 @@ def task(name: str | None = None, context: FlowContext | None = None) -> Callabl
 
 
 def _wrap_class(cls: type, name: str | None = None) -> type:
+    """helper for decorator `task` to wrap class"""
     if cls.__name__ == "DeklareClass":  # Keep this check if "DeklareClass" is still a sentinel
         # don't wrap it twice!
         return cls
@@ -311,6 +366,7 @@ def _wrap_class(cls: type, name: str | None = None) -> type:
 
 
 def _wrap_function(func: Callable, name: str | None, context: FlowContext) -> Callable:
+    """helper for decorator `task` to wrap function"""
     if isinstance(func, Delayed):
         # don't wrap it twice!
         return func

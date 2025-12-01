@@ -1,5 +1,5 @@
 import traceback
-from typing import Callable
+from typing import Any, Callable, Iterable, TypeVar
 
 import numpy as np
 import torch
@@ -7,44 +7,74 @@ from tqdm import tqdm
 
 from .utils import NodeFailedError
 
-# ToDo: Doc strings
-# ToDo: more precise types
+# ToDo: fix deskriptor types (then also in doc strings)
+
+DatasetIdx = TypeVar("DatasetIdx", int, tuple[int, int], tuple[int, Iterable[int]])
 
 
-# ToDo: class attributes
 class Dataset:
+    """dataset class to gather data from multiple flows and deskriptors
+
+    Attributes:
+        singleton (bool): True if only one flow
+        flows (list[Callable]): list of flows to gather data from
+        transforms (list[Callable]): list of additional tranforms to apply to data from flow
+        dataset_deskriptors (np.array): deskriptors that can be used to query the data
+        indices (list[int]): potentially valid indices of deskriptors
+        valid_indices (set[int]): cache which indices are valid
+        invalid_indices (set[int]): cache which indices are invalid
+    """
+
+    singleton: bool
+    flows: list[Callable]
+    transforms: list[Callable]
+    dataset_deskriptors: np.array
+    indices: list[int]
+    valid_indices: set[int]
+    invalid_indices: set[int]
+
     def __init__(
         self,
         deskriptors: list[dict],
-        flows,  # ToDo: typing # noqa: ANN001
+        flows: list[Callable] | Callable,
         transforms: list[Callable] | Callable | None = None,
     ) -> None:
         self.singleton = False
-
         if not isinstance(flows, list):
             self.singleton = True
             flows = [flows]
 
-        self.dataset_deskriptors = np.array(deskriptors)
         self.flows = flows
 
-        self.indices = np.arange(len(deskriptors)).tolist()
-
-        self.invalid_indices = {}
-        self.valid_indices = {}
+        if not isinstance(transforms, list):  # assume same transform for all flows
+            transforms = [transforms] * len(self.flows)
 
         self.transforms = transforms
+
+        self.dataset_deskriptors = np.array(deskriptors)
+        self.indices = np.arange(len(deskriptors)).tolist()
+
+        self.invalid_indices = set()
+        self.valid_indices = set()
 
     @property
     def deskriptors(self) -> dict:
         return self.dataset_deskriptors[self.indices]
 
     def mask_invalid(self) -> None:
-        local_dict = self.invalid_indices
-        self.indices = [x for x in self.indices if x not in local_dict]
+        """remove certainly invalid indices"""
+        self.indices = [x for x in self.indices if x not in self.invalid_indices]
 
     # ToDo: check if this needs to be so complicated
     def valid(self, idx: int) -> bool:
+        """check validity of index for dataset
+
+        Args:
+            idx (int): index to check
+
+        Returns:
+            bool: True if index is valid, False if invalid
+        """
         if idx in self.valid_indices:
             return True
         if idx in self.invalid_indices:
@@ -55,18 +85,27 @@ class Dataset:
         try:
             result = self.__getitem__(idx, only_validity=True)
             if isinstance(result, NodeFailedError):
+                self.invalid_indices.add(idx)
                 return False
-            if isinstance(result, tuple):
+            elif isinstance(result, tuple):
                 return all([not isinstance(item, NodeFailedError) for item in result])
+
+            self.valid_indices.add(idx)
             return True
         except Exception:
             tqdm.write(traceback.format_exc())
             return False
 
     def __len__(self) -> int:
+        """returns length of dataset"""
         return len(self.indices)
 
-    def __getitem__(self, idx: int) -> tuple:
+    def __getitem__(self, idx: DatasetIdx) -> Any | tuple[Any]:  # noqa: ANN401
+        """make dataset indexable
+
+        Args:
+            idx (DatasetIdx): index of deskriptor, if tuple second element chooses flow(s)
+        """
         singleton = self.singleton
 
         stream_select = np.arange(len(self.flows))
@@ -85,11 +124,8 @@ class Dataset:
             values = None
             values = self.flows[stream].query(deskriptor)
 
-            if isinstance(self.transforms, list):
-                if self.transforms[stream] is not None:
-                    values = self.transforms[stream](values)
-            elif self.transforms is not None:
-                values = self.transforms(values)
+            if self.transforms[stream] is not None:
+                values = self.transforms[stream](values)
 
             out.append(values)
 
@@ -99,7 +135,14 @@ class Dataset:
         return tuple(out)
 
     def check_validity(self, batch_size: int = 1, num_workers: int = 0) -> None:
-        temp_transforms = self.transforms
+        """checks which indices are valid for dataset using pytorch
+
+        Args:
+            batch_size (int): batch size to use when checking index validity. defaults to 1
+            num_workers (int): number of workers to use when checking index validity
+                defaults to 0 (as many workers as cores)
+        """
+        tmp_transforms = self.transforms
         self.transforms = None
 
         this = self
@@ -125,20 +168,19 @@ class Dataset:
             # and not within the possibly parallelized self.valid() calls
             for idx, valid in batch:
                 if valid:
-                    self.valid_indices[idx] = True
+                    self.valid_indices.add(idx)
                 else:
-                    self.invalid_indices[idx] = True
+                    self.invalid_indices.add(idx)
 
-        self.transforms = temp_transforms
+        self.transforms = tmp_transforms
 
     def preload(self, batch_size: int = 1, num_workers: int = 0) -> None:
-        """Using pytorch to preload this dataset, i.e. run through the whole dataset once.
-        The caching/persisting will happen inside the individual flows
-
+        """Using pytorch to preload this dataset, i.e. run through the whole dataset once
+        the caching/persisting will happen inside the individual flows
 
         Args:
-            batch_size (int, optional): batch size for loading. Defaults to 1.
-            num_workers (int, optional): number of parallel workers. Defaults to 0.
+            batch_size (int): batch size for loading. defaults to 1
+            num_workers (int): number of parallel workers. defaults to 0
         """
         temp_transforms = self.transforms
         self.transforms = None
