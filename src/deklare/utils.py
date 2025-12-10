@@ -34,15 +34,41 @@ def indexers_to_slices(indexers):
             new_indexers[key] = indexers[key]
 
     return new_indexers
-
-
 def exclusive_indexing(x, indexers):
-    # Fake `exlusive indexing`
-    drop_indexers = {k: indexers[k]["end"] for k in indexers if "end" in indexers[k]}
-    try:
-        x = x.drop_sel(drop_indexers, errors="ignore")
-    except Exception:
-        pass
+    for k, v in indexers.items():
+        end_val = v.get("end")
+        
+        if k not in x.coords or end_val is None:
+            continue
+
+        # 1. Grab the underlying pandas index to check metadata
+        #    This is instant (does not scan data)
+        idx = x.indexes.get(k)
+        
+        # 2. Case A: Sorted Increasing (Standard Time Series)
+        if idx is not None and idx.is_monotonic_increasing:
+            if x.sizes[k] > 0:
+                # Check last value using .item() for scalar conversion
+                # (Faster than numpy array comparison)
+                if x[k].isel({k: -1}).item() == end_val:
+                    x = x.isel({k: slice(None, -1)})
+
+        # 3. Case B: Sorted Decreasing (Rare, but possible)
+        elif idx is not None and idx.is_monotonic_decreasing:
+             if x.sizes[k] > 0:
+                # In a decreasing list, the "end" value would be at the start (index 0)
+                # assuming the user meant "exclude values <= end"
+                # If the user meant "exclude values >= end", logic flips. 
+                # Assuming standard "drop this specific label" logic:
+                if x[k].isel({k: 0}).item() == end_val:
+                    x = x.isel({k: slice(1, None)})
+
+        # 4. Case C: Unsorted / Complex (The Fallback)
+        else:
+            # Fallback to the masking method (faster than drop_sel)
+            mask = x[k] != end_val
+            if not mask.all():
+                x = x.isel({k: mask})
 
     return x
 
@@ -150,7 +176,7 @@ def get_segments(
 
         _segment_slice = segment_slice[dim]
         _segment_stride = segment_stride.get(dim, _segment_slice)
-
+#        print(_segment_slice,_segment_stride)
         dataset_scope_dim = dataset_scope[dim]
         if not isinstance(dataset_scope_dim, (list, Range, dict)):
             dataset_scope_dim = [dataset_scope_dim]
@@ -229,7 +255,7 @@ def get_segments(
 
         slices = []
         for start in iterator:
-            end = start + _segment_stride
+            end = start + _segment_slice
 
             if (
                 start <= end
