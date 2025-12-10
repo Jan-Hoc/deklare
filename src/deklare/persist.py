@@ -256,6 +256,36 @@ class PickleStorageManager(StorageManager):
         )
 
 
+import obstore 
+import obstore as obs
+
+def file_in_store(store,data_path):
+    try:
+        obs.head(store, data_path)
+        return True
+    except FileNotFoundError as e:
+        try:
+            next(iter(obs.list(store, prefix=data_path)))
+            return True
+        except StopIteration:
+            # The list was empty, so the path truly does not exist
+            return False
+
+from obstore.store import LocalStore
+def make_sub_store(parent_store, sub_path: str):
+    """
+    Creates a new LocalStore instance rooted inside the parent_store's prefix.
+    """
+    # 1. Get the current prefix (defaulting to empty string if None)
+    # obstore stores prefix as a Path object or None
+    current_prefix = getattr(parent_store, "prefix", None) or ""
+    
+    # 2. Join the old prefix with the new sub-path
+    # We use pathlib to handle slash consistency automatically
+    new_prefix = Path(current_prefix) / sub_path    
+    # 3. Return a NEW instance pointing to this deeper folder
+    return LocalStore(prefix=new_prefix,mkdir=True)
+
 @task()
 class Persister:
     def __init__(
@@ -269,6 +299,7 @@ class Persister:
         cache=None,
         global_lock=None,
         save_metadata=False,
+        hash_filter=None,
     ):
         super().__init__(force_update=force_update, use_memorycache=use_memorycache)
         if isinstance(store, str) or isinstance(store, Path):
@@ -277,7 +308,7 @@ class Persister:
         self.storage_manager = storage_manager
 
         if cache is None:
-            cache = LRUCache(10)
+            cache = LRUCache(100)
         self.cache = cache
 
         if selected_keys is None:
@@ -288,6 +319,11 @@ class Persister:
         self._global_lock = global_lock
         self._mutex = Lock()
         self.save_metadata = save_metadata
+
+        if hash_filter is not None and not callable(hash_filter):
+            raise RuntimeError("hash_filter has to be a callable")
+        
+        self.hash_filter = hash_filter
 
     def configure(self, deskriptor: T | None = None):
         deskriptor_hash = self.get_hash(deskriptor)
@@ -322,14 +358,14 @@ class Persister:
                 return deskriptor
             
             # while holding the mutex, we need to check if the file exists
-            if data_path in self.store and self.store.dirfs.info(data_path).get("size",0) > 0:
+            if file_in_store(self.store,data_path):
                 # remove previous node since we are going to load from disk
                 deskriptor["remove_dependencies"] = True
 
                 # set the compute action to load
                 deskriptor["self"]["action"] = "load"
                 return deskriptor
-            elif "fail/" + deskriptor_hash in self.store:
+            elif file_in_store(self.store,"fail/" + deskriptor_hash):
                 # remove previous node since we are going to load the fail info from disk
                 deskriptor["remove_dependencies"] = True
                 deskriptor["self"]["deskriptor_hash"] = "fail/" + deskriptor_hash
@@ -349,30 +385,32 @@ class Persister:
             return data
     
         if self.store is not None:
-            self.store.dirfs.mkdirs("data/", exist_ok=True)
+            # self.store.dirfs.mkdirs("data/", exist_ok=True)
             data_path = f"data/{deskriptor['deskriptor_hash']}"
 
-        if deskriptor["action"] == "load_from_cache":
-            with self._mutex:
-                if data_path in self.cache:
-                    cached = self.cache[data_path]
-                    return cached
+        # if deskriptor["action"] == "load_from_cache":
+            # with self._mutex:
+            #     if data_path in self.cache:
+            #         cached = self.cache[data_path]
+            #         return cached
         if deskriptor["action"] == "load" or deskriptor["action"] == "load_from_cache":
-            f = self.store.dirfs.open(data_path)
-            data = self.storage_manager.read(f)
+                substore = make_sub_store(self.store,data_path)
+                data = self.storage_manager.read(substore)
+                
 
-            with self._mutex:
-                self.cache[data_path] = data
+                # with self._mutex:
+                #     self.cache[data_path] = data
 
-            return data
+                return data
         elif deskriptor["action"] == "store":
-            with self._mutex:
-                self.cache[data_path] = data
+            # with self._mutex:
+            #     self.cache[data_path] = data
 
             if self.store is None:
                 return data 
             
-            try:
+            # try:
+            if True:
                 # in this case we assume that the second element is additional metadata for the STAC item
                 if (
                     isinstance(data, tuple)
@@ -388,11 +426,9 @@ class Persister:
                 if isinstance(data, NodeFailedException):
                     # buffer = self.storage_manager.write_buffer(data)
                     # self.store["fail/" + deskriptor["deskriptor_hash"]] = buffer.getvalue()
-                    self.store.dirfs.mkdirs("fail/", exist_ok=True)
-                    with self.store.dirfs.open(
-                        "fail/" + deskriptor["deskriptor_hash"], "wb"
-                    ) as f:
-                        self.storage_manager.write(f, data)
+                    # self.store.dirfs.mkdirs("fail/", exist_ok=True)
+                    with obstore.open_writer(self.store,"fail/" + deskriptor["deskriptor_hash"]) as f:
+                        self.storage_manager.write(self.store, data)
 
                 else:
                     if isinstance(data, str):
@@ -401,17 +437,18 @@ class Persister:
                     # buffer = self.storage_manager.write_buffer(data)
                     # self.store[data_path] = buffer.getvalue()
                     try:
-                        with self.store.dirfs.open(data_path, "wb") as f:
-                            self.storage_manager.write(f, data)
+                        # with obstore.open_writer(self.store,data_path) as f:
+                        substore = make_sub_store(self.store,data_path)
+                        self.storage_manager.write(substore, data)
                     except Exception as e:
-                        self.store.dirfs.rm(data_path)
+                        # self.store.dirfs.rm(data_path)
                         raise e
 
                     if self.save_metadata:
                         self._save_metadata(deskriptor, item_metadata)
 
-            except Exception as e:
-                print("Error during Persister", repr(e))
+            # except Exception as e:
+            #     print("Error during Persister", repr(e))
 
 
             return data
@@ -449,10 +486,13 @@ class Persister:
             str: hash of the requenst
         """
         r = {k: v for k, v in deskriptor.items() if k != "self"}
+        if self.hash_filter:
+            r = self.hash_filter(r)
         s = json.dumps(
             r, sort_keys=True, skipkeys=True, default=Persister._string_timestamp
         )
         deskriptor_hash = tokenize(s)
+        print(r,s)
 
         return deskriptor_hash
 
@@ -546,7 +586,8 @@ class ChunkPersister:
         collection_metadata: dict = {},
         save_metadata=False,
         use_memorycache=True,
-        cache = None
+        cache = None,
+        hash_filter=None,
     ):
         """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
@@ -609,7 +650,8 @@ class ChunkPersister:
         self.filesystem = filesystem
 
         if isinstance(store, str) or isinstance(store, Path):
-            store = fsspec.get_mapper(store)
+            fs = fsspec.filesystem('file', asynchronous=False)
+            store = fs.get_mapper(store)
 
         if store is None:
             store = self.filesystem.get_mapper()
@@ -641,6 +683,10 @@ class ChunkPersister:
 
         self.storage_manager = storage_manager
         self.mutex = Lock()
+        
+        if hash_filter is not None and not callable(hash_filter):
+            raise RuntimeError("hash_filter has to be a callable")
+        self.hash_filter = hash_filter
 
     def __dask_tokenize__(self):
         return (ChunkPersister,)
@@ -697,7 +743,8 @@ class ChunkPersister:
                 global_lock=self.mutex,
                 save_metadata=self.save_metadata,
                 cache = self.cache,
-                use_memorycache=self.use_memorycache
+                use_memorycache=self.use_memorycache,
+                hash_filter=self.hash_filter
             )
             cloned_persister.dask_key_name = self.dask_key_name + "_persister"
             dict_update(
