@@ -17,30 +17,29 @@ import importlib
 import inspect
 import os
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Callable
 
 import yaml
 
 from .core import init_flow_graph, task
-from .deskribe import Deskriptor
+from .descriptor import Descriptor, PermissiveDescriptor, accept_dict_descriptor
 from .graph import Node, compute
 from .persist import ChunkPersister, Persister
-
-# ToDo: fix deskriptor types (then also in doc strings)
 
 
 def deklare_flow(
     flow: Callable,
-    template_deskriptor: Deskriptor | None = None,
+    template_descriptor: type[Descriptor] | None = None,
     config_path: Path | str | None = None,
 ) -> Callable:
-    """creates a deklare flow to use to query data for given deskriptors using dask
+    """creates a deklare flow to use to query data for given descriptors using dask
 
     Args:
         flow (Callable): flow to be converted into a dask task graph
-        template_deskriptor (Deskriptor | None): template deskriptor for validation of query deskriptors
-            defaults to None
-        config_path (Path | str | None): path to a config file to replace values in query deskriptors
+        template_descriptor (type[Descriptor] | None): template descriptor class to validate fields
+            of query descriptors. defaults to None
+        config_path (Path | str | None): path to a config file to replace values in query descriptors
             defaults to None
 
     Returns:
@@ -48,27 +47,30 @@ def deklare_flow(
     """
     flow_graph = init_flow_graph(flow)
 
-    config_deskriptor = None
+    config_descriptor = None
     if config_path is not None:
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Config file not found: {config_path}")
 
         with open(config_path, "r") as f:
-            config_deskriptor = yaml.safe_load(f)
+            config_descriptor = yaml.safe_load(f)
 
-    def query_class(self, deskriptor: dict) -> Any:  # noqa: ANN001, ANN401, ARG001
+    def query_class(self, descriptor: Descriptor) -> Any:  # noqa: ANN001, ANN401, ARG001
         """wrapper for query function for classes with self attribute"""
-        return query(deskriptor)
+        return query(descriptor)
 
-    def query(deskriptor: dict) -> Any:  # noqa: ANN401
-        """query function to get data corresponding to deskriptor"""
-        if config_deskriptor:
-            deskriptor = Deskriptor.update_from_config_dict(deskriptor, config_deskriptor)
+    @accept_dict_descriptor(descriptor_cls=template_descriptor)
+    def query(descriptor: Descriptor) -> Any:  # noqa: ANN401
+        """query function to get data corresponding to descriptor"""
+        if config_descriptor:
+            descriptor = (template_descriptor or PermissiveDescriptor).update_from_config_dict(
+                descriptor, config_descriptor
+            )
 
-        if template_deskriptor:
-            deskriptor = template_deskriptor.from_dict(deskriptor).to_dict()
+        if template_descriptor:
+            descriptor = template_descriptor.from_dict(descriptor.to_dict())
 
-        return compute(flow_graph, deskriptor)
+        return compute(flow_graph, descriptor)
 
     if hasattr(flow, "__self__") and flow.__self__ is not None:
         flow.query = query_class
@@ -79,18 +81,18 @@ def deklare_flow(
 
 
 def deklare_module(
-    module: str | importlib.ModuleType,
+    module: str | ModuleType,
     flows: str | set[str] | None = None,
     names: dict[str, str] | None = None,
     external_tasks: list[str] | None = None,
     ignore: list[str] | None = None,
     no_wrap: bool = False,
-) -> tuple[importlib.ModuleType, *tuple[Callable, ...]]:
+) -> tuple[ModuleType, *tuple[Callable, ...]]:
     """
     deklare flows in a module and recursively handle dependencies
 
     Args:
-        module (str | importlib.ModuleType): Module object or module name to process
+        module (str | ModuleType): Module object or module name to process
         flows (str | set): name(s) of functions/classes to treat as flows. defaults to None
         names (dict[str, str]): dict mapping member names to task names. defaults to None
         external_tasks (list[str]): list of external task names to include. defaults to None
@@ -98,7 +100,7 @@ def deklare_module(
         no_wrap (bool): if True, flows are not wrapped with `deklare_flow`. defaults to False
 
     Returns:
-        tuple[importlib.ModuleType, *tuple[Callable, ...]]:
+        tuple[ModuleType, *tuple[Callable, ...]]:
             - The module object
             - All flow instances (possibly wrapped) in order
     """
@@ -136,11 +138,11 @@ def deklare_module(
     return tuple([module] + list(flow_instances.values()))
 
 
-def _is_module_function_or_class(_module: importlib.ModuleType) -> Callable:
+def _is_module_function_or_class(_module: ModuleType) -> Callable:
     """returns a predicate function to check if a member of a module is a function or a class
 
     Args:
-        _module (importlib.ModuleType): module to check members against
+        _module (ModuleType): module to check members against
 
     Returns:
         Callable: returns True if the member is a function or a class, else False
@@ -154,7 +156,7 @@ def _is_module_function_or_class(_module: importlib.ModuleType) -> Callable:
 
 
 def _init_modules(
-    module: importlib.ModuleType, flows: set[str], ignore: list[str], names: dict[str, str], external_tasks: list[str]
+    module: ModuleType, flows: set[str], ignore: list[str], names: dict[str, str], external_tasks: list[str]
 ) -> tuple[dict[str, Callable], dict[str, Callable]]:
     """
     initialize module flows and handle dependencies.

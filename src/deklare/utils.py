@@ -16,7 +16,8 @@ limitations under the License."""
 import itertools
 import math
 import warnings
-from typing import Any, Iterable
+from typing import Any, Iterable, get_args, get_origin
+
 
 import pandas as pd
 import xarray as xr
@@ -26,11 +27,14 @@ from dask.typing import Graph
 from pandas._libs.tslibs.nattype import NaTType
 from pandas.core.tools.datetimes import DatetimeScalar
 
-from .deskribe import Range
-from .graph import base_name
+from .core import KEY_SEP
+from .descriptor import DatetimeRange, Descriptor, Range
 
 # ToDo: Doc strings
-# ToDo: more precise types
+
+
+def base_name(name: str) -> str:
+    return name.split(KEY_SEP)[0]
 
 
 def indexers_to_slices(indexers: dict) -> dict:
@@ -75,14 +79,31 @@ class NodeFailedError(Exception):
         return str(self.exception)
 
 
-def dict_update(base: dict, update: dict, convert_nestedfrozen: bool = False) -> dict:
-    for key in update:
-        if isinstance(base.get(key), dict) and isinstance(update[key], dict):
+def descriptor_update(base: Descriptor | dict, update: dict, convert_nestedfrozen: bool = False) -> dict:
+    for key, value in update.items():
+        if key == "_deklare_attrs" and isinstance(base, Descriptor):
+            descriptor_update(base._deklare_attrs, value, convert_nestedfrozen=convert_nestedfrozen)
+
+        if isinstance(base, Descriptor) and key in base:
+            field_info = base.__pydantic_fields__[key]
+            if DatetimeRange in get_args(field_info.annotation) and isinstance(value, dict):
+                value = DatetimeRange(**value)
+            elif isinstance(value, dict):
+                for t in get_args(field_info.annotation):
+                    if issubclass(t, Range):
+                        value = Range(**value)
+                        break
+
+        if isinstance(value, dict):
+            if key not in base:
+                base[key] = {}
+
             if convert_nestedfrozen:
                 base[key] = dict(base[key])
-            base[key] = dict_update(base[key], update[key], convert_nestedfrozen=convert_nestedfrozen)
+
+            base[key] = descriptor_update(base[key], value, convert_nestedfrozen=convert_nestedfrozen)
         else:
-            base[key] = update[key]
+            base[key] = value
 
     return base
 

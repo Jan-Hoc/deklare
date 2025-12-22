@@ -26,11 +26,11 @@ import dask.delayed
 from dask.delayed import Delayed
 from dask.typing import Graph
 
-KEY_SEP = "+"
-PROTECTED_DESKRIPTOR_KEYS = ["self", "config"]
-PROTECTED_CONFIG_KEYS = ["global", "types", "keys"]
+from .descriptor import Descriptor, accept_dict_descriptor
 
-# ToDo: fix deskriptor types (then also in doc strings)
+KEY_SEP = "+"
+PROTECTED_DESCRIPTOR_KEYS = ["self", "config"]
+PROTECTED_CONFIG_KEYS = ["global", "types", "keys"]
 
 
 class FlowContext:
@@ -91,11 +91,11 @@ class Node(object):
 
     Attributes:
         _name (str | None): name of Node
-        config (dict): configuration of Node
+        config (Descriptor): configuration of Node
     """
 
     _name: str | None
-    config: dict
+    config: Descriptor
 
     def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401
         self.config = locals().copy()
@@ -111,40 +111,40 @@ class Node(object):
 
         self._name = None
 
-    def merge_config(self, deskriptor: dict) -> dict:
-        """Each deskriptor contains configuration which may apply to different
+    def merge_config(self, descriptor: Descriptor) -> Descriptor:
+        """Each descriptor contains configuration which may apply to different
         node instances. This function collects all information that apply to _this_
-        node (including it's preset configs) and adds a `self` keyword to the deskriptor.
+        node (including it's preset configs) and adds a `self` keyword to the descriptor.
 
         Args:
-            deskriptor (dict): The deskriptor and configuration options.
+            descriptor (Descriptor): The descriptor and configuration options.
 
         Returns:
-            dict: A new deskriptor which specific to this node.
+            Descriptor: A new descriptor which specific to this node.
         """
-        new_deskriptor = self._copy_deskriptor(deskriptor)
+        new_descriptor = self._copy_descriptor(descriptor)
 
-        self._update_deskriptor_config(deskriptor, new_deskriptor)
+        self._update_descriptor_config(descriptor, new_descriptor)
 
-        return new_deskriptor
+        return new_descriptor
 
-    def configure(self, deskriptor: dict) -> dict:
+    def configure(self, descriptor: Descriptor) -> Descriptor:
         """Before a task graph is executed each node is configured.
-        The deskriptor is propagated from the end to the beginning
+        The descriptor is propagated from the end to the beginning
         of the DAG and each nodes "configure" routine is called.
-        The deskriptor can be updated to reflect additional requirements,
+        The descriptor can be updated to reflect additional requirements,
         The return value gets passed to predecessors.
 
         Essentially the following question must be answered within the
         nodes configure function:
-        What do I need to fulfil the deskriptor of my successor? Either the node
-        can provide what is required or the deskriptor is passed through to
-        predecessors in hope they can fulfil the deskriptor.
+        What do I need to fulfil the descriptor of my successor? Either the node
+        can provide what is required or the descriptor is passed through to
+        predecessors in hope they can fulfil the descriptor.
 
         Here, you must not configure the internal parameters of the
         Node otherwise it would not be thread-safe. You can however
-        introduce a new key 'requires_deskriptor' in the deskriptor being
-        returned. This deskriptor will then be passed as an argument
+        introduce a new key 'requires_descriptor' in the descriptor being
+        returned. This descriptor will then be passed as an argument
         to the __call__ function.
 
         Best practice is to configure the Node on initialization with
@@ -152,24 +152,24 @@ class Node(object):
         dependant configurations here.
 
         Args:
-            deskriptor (dict): deskriptor to merge with own config.
+            descriptor (Descriptor): descriptor to merge with own config.
 
         Returns:
-            dict: The (updated) deskriptor. If updated, modifications
+            Descriptor: The (updated) descriptor. If updated, modifications
                   must be made on a copy of the input. The return value
-                  must be a dictionary.
-                  If multiple deskriptors are input to this function they
+                  must be a Descriptor.
+                  If multiple descriptors are input to this function they
                   must be merged.
-                  If nothing needs to be deskriptored an empty dictionary
-                  can be return. This removes all dependencies of this
+                  If nothing needs to be descriptored an empty Descriptor
+                  can be returned. This removes all dependencies of this
                   node from the task graph.
         """
-        merged_deskriptor = self.merge_config(deskriptor)
+        merged_descriptor = self.merge_config(descriptor)
 
         # set default
-        merged_deskriptor["requires_deskriptor"] = True
+        merged_descriptor._set_internal("requires_descriptor", True)
 
-        return merged_deskriptor
+        return merged_descriptor
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         """
@@ -180,7 +180,7 @@ class Node(object):
             **kwargs (Any): keyword arguments, may optionally include special args:
                 - name (str): name for the task. must not contain `KEY_SEP`
                 - context (FlowContext): execution context
-                - deskriptor (dict) : configuration dictionary to merge with the instance's config
+                - descriptor (Descriptor) : configuration dictionary to merge with the instance's config
 
         Returns:
             Any: result of computation. if `context.is_enabled()`, returns corresponding `dask.delayed` object
@@ -198,12 +198,12 @@ class Node(object):
             name = self._name
 
         new_kwargs = copy(kwargs)
-        if kwargs.get("deskriptor", None) is not None:
-            new_kwargs["deskriptor"] = self.merge_config(kwargs["deskriptor"])
-        elif kwargs.get("deskriptor", None) is not None:
-            new_kwargs["deskriptor"] = self.merge_config(kwargs["deskriptor"])
+        if kwargs.get("descriptor", None) is not None:
+            new_kwargs["descriptor"] = self.merge_config(kwargs["descriptor"])
+        elif kwargs.get("descriptor", None) is not None:
+            new_kwargs["descriptor"] = self.merge_config(kwargs["descriptor"])
         else:
-            new_kwargs["deskriptor"] = self.merge_config({})
+            new_kwargs["descriptor"] = self.merge_config(Descriptor())
 
         if context is None:
             context = FlowContext
@@ -217,72 +217,73 @@ class Node(object):
         else:
             return forward_func(*args, **kwargs)
 
-    def _copy_deskriptor(self, deskriptor: dict) -> dict:
-        """copies deskriptor with config of instance under "self" if present
-        ignores PROTECTED_DESKRIPTOR_KEYS
+    def _copy_descriptor(self, descriptor: Descriptor) -> Descriptor:
+        """copies descriptor with config of instance under "self" if present
+        ignores PROTECTED_DESCRIPTOR_KEYS
 
         Args:
-            deskriptor (dict): initial deskriptor to copy
+            descriptor (Descriptor): initial descriptor to copy
 
         Returns:
-            dict: copied and udpated deskriptor
+            Descriptor: copied and udpated descriptor
         """
-        new_deskriptor = deepcopy(deskriptor)
+        new_descriptor = deepcopy(descriptor)
 
-        new_deskriptor["self"] = {}
+        new_descriptor._set_internal("self", {})
         if hasattr(self, "config"):
-            new_deskriptor["self"].update(deepcopy(self.config))
+            new_descriptor._get_internal("self").update(deepcopy(self.config))
 
-        for key in deskriptor:
-            if key not in PROTECTED_DESKRIPTOR_KEYS:
-                new_deskriptor["self"][key] = deskriptor[key]
+        for key in descriptor:
+            if key not in PROTECTED_DESCRIPTOR_KEYS:
+                new_descriptor._get_internal("self")[key] = descriptor[key]
 
-        return new_deskriptor
+        return new_descriptor
 
-    def _update_deskriptor_config(self, old_deskriptor: dict, new_deskriptor: dict) -> None:
-        """Merge configuration from an old deskriptor into a new deskriptor's `self` parameters.
+    def _update_descriptor_config(self, old_descriptor: Descriptor, new_descriptor: Descriptor) -> None:
+        """Merge configuration from an old descriptor into a new descriptor's `self` parameters.
 
         Args:
-            old_deskriptor (dict): old deskriptor values to update new deskriptor
-            new_deskriptor (dict): new deskriptor to update `self` parameters
+            old_descriptor (Descriptor): old descriptor values to update new descriptor
+            new_descriptor (Descriptor): new descriptor to update `self` parameters
         """
-        assert isinstance(new_deskriptor["self"], dict)  # for type hints, is set to dict in _copy_deskriptor
-
-        if old_deskriptor.get("config", None) is not None:
-            # go through all parameters in the deskriptor's config and add them to the self parameters
+        if old_descriptor.config is not None:
+            # go through all parameters in the descriptor's config and add them to the self parameters
 
             # assume anything within 'config' is global
-            for key in old_deskriptor["config"]:
+            for key in old_descriptor.config:
                 if key in PROTECTED_CONFIG_KEYS:
                     continue
 
-                new_deskriptor["self"][key] = old_deskriptor["config"][key]
+                new_descriptor._get_internal("self")[key] = old_descriptor.config[key]
 
             # add specific global config entries
-            if "global" in old_deskriptor["config"]:
-                for key in old_deskriptor["config"]["global"]:
-                    new_deskriptor["self"][key] = old_deskriptor["config"]["global"][key]
+            if "global" in old_descriptor.config:
+                for key in old_descriptor.config["global"]:
+                    new_descriptor._get_internal("self")[key] = old_descriptor.config["global"][key]
 
             # add type specific configs (overwrites global config)
-            if "types" in old_deskriptor["config"]:
-                if type(self).__name__ in old_deskriptor["config"]["types"]:
-                    new_deskriptor["self"].update(deepcopy(old_deskriptor["config"]["types"][type(self).__name__]))
+            if "types" in old_descriptor.config:
+                if type(self).__name__ in old_descriptor.config["types"]:
+                    new_descriptor._get_internal("self").update(
+                        deepcopy(old_descriptor.config["types"][type(self).__name__])
+                    )
 
             # add key specific configs (overwrites global and type config)
-            if "keys" in old_deskriptor["config"]:
-                if self.dask_key_name in old_deskriptor["config"]["keys"]:
-                    new_deskriptor["self"].update(deepcopy(old_deskriptor["config"]["types"][self.dask_key_name]))
+            if "keys" in old_descriptor.config:
+                if self.dask_key_name in old_descriptor.config["keys"]:
+                    new_descriptor._get_internal("self").update(
+                        deepcopy(old_descriptor.config["types"][self.dask_key_name])
+                    )
 
-                    # TODO: It should be safe to remove these keys from the new_deskriptor!?
-                    del new_deskriptor["config"]["keys"][self.dask_key_name]
+                    # TODO: It should be safe to remove these keys from the new_descriptor!?
+                    del new_descriptor.config["keys"][self.dask_key_name]
 
                 # TODO: should we prefer the following way of removing the config?
-                # new_deskriptor['config']['keys'] = {k:v for k,v in old_deskriptor["config"]["keys"].items() if k != self.dask_key_name}  # noqa: E501
+                # new_descriptor['config']['keys'] = {k:v for k,v in old_descriptor["config"]["keys"].items() if k != self.dask_key_name}  # noqa: E501
 
-            new_deskriptor["config"] = old_deskriptor["config"]
+            new_descriptor.config = old_descriptor.config
 
 
-# ToDo: fix types
 def init_flow_graph(flow: Callable) -> Graph:
     """initialises dask task graph from flow
     parts of the callstack of flow not decorated with @task or of type Node will be treated like normal call
@@ -348,10 +349,10 @@ def _wrap_class(cls: type, name: str | None = None) -> type:
     if "configure" in cls.__dict__:
         original_inherit_method = cls.__dict__["configure"]
 
-        def new_configure(self: type, deskriptor: dict) -> dict:
+        def new_configure(self: type, descriptor: Descriptor) -> Descriptor:
             # Ensure Node.configure is called correctly
-            deskriptor = Node.configure(self, deskriptor)
-            return original_inherit_method(self, deskriptor)
+            descriptor = Node.configure(self, descriptor)
+            return original_inherit_method(self, descriptor)
 
         new_cls.configure = new_configure
 

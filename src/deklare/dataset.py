@@ -5,22 +5,21 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from .descriptor import Descriptor
 from .utils import NodeFailedError
-
-# ToDo: fix deskriptor types (then also in doc strings)
 
 DatasetIdx = TypeVar("DatasetIdx", int, tuple[int, int], tuple[int, Iterable[int]])
 
 
 class Dataset:
-    """dataset class to gather data from multiple flows and deskriptors
+    """dataset class to gather data from multiple flows and descriptors
 
     Attributes:
         singleton (bool): True if only one flow
         flows (list[Callable]): list of flows to gather data from
         transforms (list[Callable]): list of additional tranforms to apply to data from flow
-        dataset_deskriptors (np.array): deskriptors that can be used to query the data
-        indices (list[int]): potentially valid indices of deskriptors
+        dataset_descriptors (list[Descriptor]): descriptors that can be used to query the data
+        indices (list[int]): potentially valid indices of descriptors
         valid_indices (set[int]): cache which indices are valid
         invalid_indices (set[int]): cache which indices are invalid
     """
@@ -28,14 +27,14 @@ class Dataset:
     singleton: bool
     flows: list[Callable]
     transforms: list[Callable]
-    dataset_deskriptors: np.array
+    dataset_descriptors: list[Descriptor]
     indices: list[int]
     valid_indices: set[int]
     invalid_indices: set[int]
 
     def __init__(
         self,
-        deskriptors: list[dict],
+        descriptors: list[Descriptor],
         flows: list[Callable] | Callable,
         transforms: list[Callable] | Callable | None = None,
     ) -> None:
@@ -51,15 +50,15 @@ class Dataset:
 
         self.transforms = transforms
 
-        self.dataset_deskriptors = np.array(deskriptors)
-        self.indices = np.arange(len(deskriptors)).tolist()
+        self.dataset_descriptors = descriptors
+        self.indices = range(len(descriptors))
 
         self.invalid_indices = set()
         self.valid_indices = set()
 
     @property
-    def deskriptors(self) -> dict:
-        return self.dataset_deskriptors[self.indices]
+    def descriptors(self) -> Descriptor:
+        return self.dataset_descriptors[self.indices]
 
     def mask_invalid(self) -> None:
         """remove certainly invalid indices"""
@@ -104,7 +103,7 @@ class Dataset:
         """make dataset indexable
 
         Args:
-            idx (DatasetIdx): index of deskriptor, if tuple second element chooses flow(s)
+            idx (DatasetIdx): index of descriptor, if tuple second element chooses flow(s)
         """
         singleton = self.singleton
 
@@ -117,12 +116,12 @@ class Dataset:
 
         internal_idx = self.indices[idx]
 
-        deskriptor = self.dataset_deskriptors[internal_idx]
+        descriptor = self.dataset_descriptors[internal_idx]
         out = []
         for stream in stream_select:
             # check if dataset was persisted before
             values = None
-            values = self.flows[stream].query(deskriptor)
+            values = self.flows[stream].query(descriptor)
 
             if self.transforms[stream] is not None:
                 values = self.transforms[stream](values)

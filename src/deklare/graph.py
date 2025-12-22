@@ -27,19 +27,15 @@ from dask.typing import Graph
 from dask.utils import apply
 
 from .core import KEY_SEP, Node
-from .utils import NodeFailedError
-
-
-def base_name(name: str) -> str:
-    return name.split(KEY_SEP)[0]
-
+from .descriptor import Descriptor, accept_dict_descriptor
+from .utils import NodeFailedError, base_name
 
 # ToDo: Doc strings
-# ToDo: fix deskriptor types (then also in doc strings)
+# ToDo: fix descriptor types (then also in doc strings)
 
 FUNCTION = 1
 DATA = 2
-DESKRIPTOR = 3
+DESCRIPTOR = 3
 
 
 class App:
@@ -89,11 +85,10 @@ class FailSafeWrapper:
             return NodeFailedError(trace)
 
 
-def update_key_in_config(deskriptor: dict, old_key: str, new_key: str) -> None:
-    if "config" in deskriptor:
-        if "keys" in deskriptor["config"]:
-            if old_key in deskriptor["config"]["keys"]:
-                deskriptor["config"]["keys"][new_key] = deskriptor["config"]["keys"].pop(old_key)
+def update_key_in_config(descriptor: Descriptor, old_key: str, new_key: str) -> None:
+    if "keys" in descriptor.config:
+        if old_key in descriptor.config["keys"]:
+            descriptor.config["keys"][new_key] = descriptor.config["keys"].pop(old_key)
 
 
 def generate_clone_key(current_node_name: str, to_clone_key: str, clone_id: str) -> str:
@@ -102,25 +97,26 @@ def generate_clone_key(current_node_name: str, to_clone_key: str, clone_id: str)
 
 # @profile
 # ToDo: break into multiple smaller functions
+# ToDo: check descriptor types
 def configuration(  # noqa: C901
     delayed: Delayed | list[Delayed],
-    deskriptors: dict | list[dict],
+    descriptors: Descriptor | list[Descriptor],
     keys: Iterable | None = None,
     _default_merge: Callable | None = None,
     optimize_graph: bool = True,
     dependants: dict | None = None,
     clone_instead_merge: bool = True,
 ) -> Delayed | list[Delayed]:
-    """Configures each node of the graph by propagating the deskriptor from outputs
-    to inputs. Each node checks if it can fulfill the deskriptor and what it needs to fulfill
-    the deskriptor. If a node requires additional configurations to fulfill the deskriptor it
-    can set the 'requires_deskriptor' flag in the returned deskriptor and this function will
-    add the return deskriptor as a a new input to the node's __call__().
+    """Configures each node of the graph by propagating the descriptor from outputs
+    to inputs. Each node checks if it can fulfill the descriptor and what it needs to fulfill
+    the descriptor. If a node requires additional configurations to fulfill the descriptor it
+    can set the 'requires_descriptor' flag in the returned descriptor and this function will
+    add the return descriptor as a a new input to the node's __call__().
     See also Node.configure()
 
     Args:
         delayed (dask.delayed or list): Delayed object or list of delayed objects
-        deskriptor (dict or list): deskriptor (dict), list of deskriptors
+        descriptor (Descriptor or list): descriptor (Descriptor), list of descriptors
         keys (_type_, optional): _description_. Defaults to None.
         default_merge (_type_, optional): _description_. Defaults to None.
         optimize_graph (bool, optional): _description_. Defaults to True.
@@ -133,7 +129,7 @@ def configuration(  # noqa: C901
         dask.delayed: The configured graph
     """
 
-    collections = delayed if delayed is isinstance(delayed, list) else delayed
+    collections = delayed if delayed is isinstance(delayed, list) else [delayed]
 
     dsk, dsk_keys = _extract_graph_and_keys(collections)  # ToDo: dont use internal functions
     dependants = dependants or get_deps(dsk)[1]
@@ -144,44 +140,44 @@ def configuration(  # noqa: C901
     if not isinstance(keys, (list, set)):
         keys = [keys]
 
-    # ToDo: set does not preserve order? then does making the deskriptor dict make sense?
+    # ToDo: set does not preserve order? then does making the descriptor dict make sense?
     work = list(set(flatten(keys)))
-    # create a deepcopy, otherwise we might overwrite deskriptors and falsify its usage outside of this function
-    # deskriptor = deepcopy(deskriptor)
+    # create a deepcopy, otherwise we might overwrite descriptors and falsify its usage outside of this function
+    # descriptor = deepcopy(descriptor)
     clone_input = False
-    if isinstance(deskriptors, list) and len(work) == 1:
-        deskriptors = {k: deskriptors for k in work}
+    if isinstance(descriptors, list) and len(work) == 1:
+        descriptors = {k: descriptors for k in work}
         clone_input = True
-    elif isinstance(deskriptors, list) and len(work) != 1:
-        # deskriptor = [NestedFrozenDict(r) for r in deskriptor if r]
-        deskriptors = [r for r in deskriptors if r]
-        if len(deskriptors) != len(work):
+    elif isinstance(descriptors, list) and len(work) != 1:
+        # descriptor = [NestedFrozenDict(r) for r in descriptor if r]
+        descriptors = [r for r in descriptors if r]
+        if len(descriptors) != len(work):
             raise RuntimeError(
-                "When passing multiple deskriptor items and the flow has multiple outputs"
-                "The number of deskriptor items must be same "
+                "When passing multiple descriptor items and the flow has multiple outputs"
+                "The number of descriptor items must be same "
                 "as the number of keys/outputs"
             )
 
-        deskriptors = [d for d in deskriptors if d]
+        descriptors = [d for d in descriptors if d]
 
-        # For each output node different deskriptor has been provided
-        deskriptors = {work[i]: [deskriptors[i]] for i in range(len(deskriptors))}
+        # For each output node different descriptor has been provided
+        descriptors = {work[i]: [descriptors[i]] for i in range(len(descriptors))}
     else:
-        # Every output node receives the same deskriptor
-        deskriptors = {k: [deskriptors] for k in work}
+        # Every output node receives the same descriptor
+        descriptors = {k: [descriptors] for k in work}
 
-    input_deskriptors = {}
+    input_descriptors = {}
     # create a new graph with the configured nodes of the old graph
     out_keys = []  # keep track of configured keys
     work = {k: True for k in work}  # dict for performance and sets dont work?
 
     if clone_input:
         k = next(iter(work))
-        clone_dependencies = deskriptors
+        clone_dependencies = descriptors
         current_deps = get_dependencies(dsk_dict, k, as_list=True)
         work = {}
         keys = []
-        for clone_id, deskriptor in enumerate(clone_dependencies):
+        for clone_id, descriptor in enumerate(clone_dependencies):
             k_in_keys = []
             clone_k = generate_clone_key("fakeit", k, clone_id)
             work[clone_k] = True
@@ -208,7 +204,7 @@ def configuration(  # noqa: C901
                     for cd in clone_work:
                         clone_d = generate_clone_key(clone_k, cd, clone_id)
 
-                        # update_key_in_config(deskriptor,cd,clone_d)
+                        # update_key_in_config(descriptor,cd,clone_d)
                         # TODO: do we need to reset the dask_key_name of each
                         #       of each cloned node?
 
@@ -237,10 +233,10 @@ def configuration(  # noqa: C901
                     clone_work = new_clone_work
             dsk_k = list(dsk_dict[clone_k])
             dsk_k[DATA] = k_in_keys
-            dsk_k[DESKRIPTOR] = deskriptor
+            dsk_k[DESCRIPTOR] = descriptor
             dsk_dict[clone_k] = tuple(dsk_k)
 
-            deskriptors[clone_k] = [deskriptor]
+            descriptors[clone_k] = [descriptor]
             keys += [clone_k]
 
     remove = {k: False for k in work}
@@ -250,8 +246,8 @@ def configuration(  # noqa: C901
 
         out_keys += work
         for key in work:
-            if key not in deskriptors:
-                raise InternalError(f"Failed to find deskriptor for node {key}")
+            if key not in descriptors:
+                raise InternalError(f"Failed to find descriptor for node {key}")
 
             # check if we have collected all dependencies so far
             # we will come back to this node another time
@@ -272,41 +268,47 @@ def configuration(  # noqa: C901
             # Check if we get a node of type Node class
             if argument_is_node:
                 # have a node class so we can use it's configure function
-                assert len(deskriptors[key]) == 1
-                new_deskriptor = dsk_dict[key][1].__self__.configure(
-                    deskriptors[key][0]
-                )  # configure the deskriptor for the class
+                assert len(descriptors[key]) == 1
+                new_descriptor = dsk_dict[key][1].__self__.configure(
+                    descriptors[key][0]
+                )  # configure the descriptor for the class
             else:
                 # no Node class => no custom configuration function => pass through
-                new_deskriptor = {}
-                assert len(deskriptors[key]) == 1
-                r = dict(deskriptors[key][0])
+                new_descriptor = Descriptor()
+                assert len(descriptors[key]) == 1
+                r = descriptors[key][0]
 
-                # sanitize deskriptor
+                # sanitize descriptor
                 if r is not None:
                     ignored_keys = [
-                        "requires_deskriptor",
+                        "requires_descriptor",
                         "insert_predecessor",
                         "clone_dependencies",
                         "remove_dependency",
                         "remove_dependencies",
                     ]
-                    new_deskriptor = {k: v for k, v in r.items() if k not in ignored_keys}
+                    new_descriptor = r.__self__.from_dict(
+                        {k: v for k, v in r.to_dict().items() if k not in ignored_keys}
+                    )
+                    new_descriptor._deklare_attrs = {
+                        k: v for k, v in new_descriptor._deklare_attrs if k not in ignored_keys
+                    }
 
             # update dependencies
             # we're going to get all dependencies of this node and check if it requires to clone it's input path
-            # if so, each cloned path gets a different deskriptor from this node (contained in `clone_dependencies`)
+            # if so, each cloned path gets a different descriptor from this node (contained in `clone_dependencies`)
             # we are going to introduce new keys and new nodes in the graph
             # so must update this nodes input keys (hacking it from/to dsk_dict[k][DATA]) for each clone
 
-            # for now it's not possible to have predecessors and multiple deskriptors
-            # User must use one deskriptor with `clone_dependencies` and `insert_predecessor` keys
+            # for now it's not possible to have predecessors and multiple descriptors
+            # User must use one descriptor with `clone_dependencies` and `insert_predecessor` keys
             insert_predecessor = []
-            if isinstance(new_deskriptor, dict):
-                insert_predecessor = new_deskriptor.get("insert_predecessor", [])
+            if isinstance(new_descriptor, Descriptor):
+                if "insert_predecessor" in new_descriptor._deklare_attrs:
+                    insert_predecessor = new_descriptor._get_internal("insert_predecessor")
 
                 if insert_predecessor:
-                    del new_deskriptor["insert_predecessor"]
+                    del new_descriptor._deklare_attrs["insert_predecessor"]
 
             current_deps = get_dependencies(dsk_dict, key, as_list=True)
 
@@ -314,10 +316,10 @@ def configuration(  # noqa: C901
             if len(dsk_dict[key]) > DATA:
                 k_in_keys = deepcopy(dsk_dict[key][DATA])  # [DATA] equals in_keys in dict
 
-            clone_dependencies = new_deskriptor if isinstance(new_deskriptor, list) else [new_deskriptor]
+            clone_dependencies = new_descriptor if isinstance(new_descriptor, list) else [new_descriptor]
 
-            # check if any of our current dependencies already has to fulfil a deskriptor
-            # since the deskriptor's might collide we should just duplicate it
+            # check if any of our current dependencies already has to fulfil a descriptor
+            # since the descriptor's might collide we should just duplicate it
             # in this run it gets a new name, and the existing one is left untouched until it's its turn.
             clone = False
             if clone_instead_merge:
@@ -326,25 +328,25 @@ def configuration(  # noqa: C901
                     k_in_keys = []
                 else:
                     for dep in current_deps:
-                        if deskriptors.get(dep, []):
+                        if descriptors.get(dep, []):
                             clone = True
                             k_in_keys = []
 
             # if it's a list it automatically clones it, else the user could use the clone_dependencies to clone
-            if isinstance(new_deskriptor, dict):
-                if new_deskriptor.get("clone_dependencies", False):
+            if isinstance(new_descriptor, Descriptor):
+                if new_descriptor._get_internal("clone_dependencies") or False:
                     clone = True
                     k_in_keys = []
-                    clone_dependencies = new_deskriptor["clone_dependencies"]
-                    del new_deskriptor["clone_dependencies"]
+                    clone_dependencies = new_descriptor._get_internal("clone_dependencies")
+                    del new_descriptor._deklare_attrs["clone_dependencies"]
 
-                elif new_deskriptor.get("requires_deskriptor", False):
-                    del new_deskriptor["requires_deskriptor"]
-                    input_deskriptors[key] = new_deskriptor["self"]
+                elif new_descriptor._get_internal("requires_descriptor") or False:
+                    del new_descriptor._deklare_attrs["requires_descriptor"]
+                    input_descriptors[key] = new_descriptor._get_internal("self")
 
             clone_dependencies = [dep for dep in clone_dependencies if dep]
 
-            for clone_id, deskriptor in enumerate(clone_dependencies):
+            for clone_id, descriptor in enumerate(clone_dependencies):
                 if clone:
                     to_clone_keys = dsk_dict[key][DATA]
                     if not isinstance(to_clone_keys, list):
@@ -353,13 +355,12 @@ def configuration(  # noqa: C901
                     # create new node in graph containing k_in_keys as input
                     if insert_predecessor:
                         pre_function = insert_predecessor[clone_id]
-                        pre_deskriptor = clone_dependencies[clone_id]
+                        pre_descriptor = clone_dependencies[clone_id]
 
                         pre_k = tokenize([key, "deklare_pre", clone_id])
                         if hasattr(pre_function, "__self__") and hasattr(pre_function.__self__, "dask_key_name"):
                             pre_k = pre_function.__self__.dask_key_name + KEY_SEP + pre_k
-
-                        deskriptors[pre_k] = [pre_deskriptor]
+                        descriptors[pre_k] = [pre_descriptor]
                         dsk_dict[pre_k] = [apply, pre_function, [], {}]
                         pre_in_keys = []
 
@@ -414,40 +415,40 @@ def configuration(  # noqa: C901
                     # determine what needs to be removed
                     if not insert_predecessor:
                         # we are not going to remove anything if we inserted a predecessor node before current node k
-                        # we are also not updating the deskriptors of dependencies of the original node k
+                        # we are also not updating the descriptors of dependencies of the original node k
                         # since it will be done in the next interaction by configuring the inserted predecessor
 
                         to_be_removed = False
                         if key in remove:
                             to_be_removed = remove[key]
 
-                        if deskriptor is None:
+                        if descriptor is None:
                             to_be_removed = True
-                        elif "remove_dependencies" in deskriptor:
-                            to_be_removed = deskriptor["remove_dependencies"]
-                            del deskriptor["remove_dependencies"]
+                        elif "remove_dependencies" in descriptor._deklare_attrs:
+                            to_be_removed = descriptor._deklare_attrs["remove_dependencies"]
+                            del descriptor._deklare_attrs["remove_dependencies"]
 
                         # TODO: so far this doesn't allow to clone dependencies and delete only one of them.
                         #       it might be irrelevant.
-                        if deskriptor.get("remove_dependency", {}).get(base_name(dep), False):
+                        if descriptor._deklare_attrs.get("remove_dependency", {}).get(base_name(dep), False):
                             to_be_removed = True
-                            del deskriptor["remove_dependency"][base_name(dep)]
+                            del descriptor._deklare_attrs["remove_dependency"][base_name(dep)]
 
-                        if not deskriptor.get("remove_dependency", True):
+                        if not descriptor._deklare_attrs.get("remove_dependency", True):
                             # clean up if an empty dict still exists
-                            del deskriptor["remove_dependency"]
-                        if dep in deskriptors:
+                            del descriptor._deklare_attrs["remove_dependency"]
+                        if dep in descriptors:
                             if clone_instead_merge:
                                 raise InternalError(
-                                    f"A duplicate deskriptor was found for {dep} with the deskriptor \
-{deskriptor[dep]}, set clone_instead_merge=False to allow this"
+                                    f"A duplicate descriptor was found for {dep} with the descriptor \
+{descriptor[dep]}, set clone_instead_merge=False to allow this"
                                 )
                             if not to_be_removed:
-                                deskriptors[dep] += [deskriptor]
+                                descriptors[dep] += [descriptor]
                             remove[dep] = remove[dep] and to_be_removed
                         else:
                             if not to_be_removed:
-                                deskriptors[dep] = [deskriptor]
+                                descriptors[dep] = [descriptor]
                             # if we received None
                             remove[dep] = to_be_removed
 
@@ -479,47 +480,47 @@ def configuration(  # noqa: C901
     # Assembling the configured new graph
     out = {k: dsk_dict[-k] for k in out_keys if not remove[k]}
 
-    # After we have acquired all deskriptors we can input the required_deskriptors as a input node to the requiring node
-    # we assume that the last argument is the deskriptor
-    for key in input_deskriptors:
+    # After we have acquired all descriptors we can input the required_descriptors as a input node to the requiring node
+    # we assume that the last argument is the descriptor
+    for key in input_descriptors:
         if key not in out:
             continue
-        # input_deskriptors[k] = clean_deskriptor(input_deskriptors[k])
-        # Here we assume that we always receive the same tuple of (bound method, data, deskriptor)
+        # input_descriptors[k] = clean_descriptor(input_descriptors[k])
+        # Here we assume that we always receive the same tuple of (bound method, data, descriptor)
         # If the interface changes this will break #TODO: check for all cases
-        if isinstance(out[key][DESKRIPTOR], tuple):
+        if isinstance(out[key][DESCRIPTOR], tuple):
             # FIXME: find a better inversion of unpack_collections().
             #        this is very fragile
-            # Check if we've already got a deskriptor as argument
+            # Check if we've already got a descriptor as argument
             # This is the case if our node will make use of a general config
-            # Then the present deskriptor is updated with the configured one
+            # Then the present descriptor is updated with the configured one
             # We need to recreate the tuple/list elements though. (dask changed)
-            # TODO: use a distinct deskriptor class
-            if out[key][DESKRIPTOR][0] is dict:
+            # TODO: use a distinct descriptor class
+            if out[key][DESCRIPTOR][0] is dict:
                 my_dict = {}
                 # FIXME: it does not account for nested structures
-                for item in out[key][DESKRIPTOR][1]:
+                for item in out[key][DESCRIPTOR][1]:
                     if isinstance(item[1], tuple):
                         if item[1][0] is tuple:
                             item[1] = tuple(item[1][1])
                         elif item[1][0] is list:
                             item[1] = list(item[1][1])
                     my_dict[item[0]] = item[1]
-                my_dict = {item[0]: item[1] for item in out[key][DESKRIPTOR][1]}
-                my_dict.update(input_deskriptors[key])
-                out[key] = out[key][:DESKRIPTOR] + (my_dict,)
+                my_dict = {item[0]: item[1] for item in out[key][DESCRIPTOR][1]}
+                my_dict.update(input_descriptors[key])
+                out[key] = out[key][:DESCRIPTOR] + (my_dict,)
             else:
                 # replace the last entry
-                out[key] = out[key][:DESKRIPTOR] + (input_deskriptors[key],)
+                out[key] = out[key][:DESCRIPTOR] + (input_descriptors[key],)
 
         # # TODO: verify that we can ignore this case
-        # elif isinstance(out[k][DESKRIPTOR], dict):
-        #     out[k] = out[k][:DESKRIPTOR] + (copy(out[k][DESKRIPTOR]) | copy(input_deskriptors[k]),)
+        # elif isinstance(out[k][DESCRIPTOR], dict):
+        #     out[k] = out[k][:DESCRIPTOR] + (copy(out[k][DESCRIPTOR]) | copy(input_descriptors[k]),)
         else:
             # replace the last entry
-            out[key] = out[key][:DESKRIPTOR] + (input_deskriptors[key],)
+            out[key] = out[key][:DESCRIPTOR] + (input_descriptors[key],)
 
-        # TODO: we might dask.delayed(out[k][DESKRIPTOR]) here
+        # TODO: we might dask.delayed(out[k][DESCRIPTOR]) here
 
     # convert to delayed object
     in_keys = list(flatten(keys))
@@ -568,8 +569,8 @@ def optimize(
     return collection
 
 
-def compute(graph: Graph, deskriptor: dict) -> Any:  # noqa: ANN401
-    configured_graph = configuration(graph, deskriptor)
+def compute(graph: Graph, descriptor: Descriptor) -> Any:  # noqa: ANN401
+    configured_graph = configuration(graph, descriptor)
 
     computed_result = dask.compute(configured_graph)[0]
     return computed_result

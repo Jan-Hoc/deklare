@@ -23,6 +23,8 @@ import pystac
 import xarray as xr
 from shapely.geometry import Polygon, mapping
 
+from .descriptor import DatetimeRange, Descriptor, Range
+
 Index = TypeVar(
     "Index",
     int,
@@ -37,7 +39,8 @@ Index = TypeVar(
     dict[str, Any],
 )
 
-# ToDo: fix deskriptor types (then also in doc strings)
+# ToDo: fix descriptor types (then also in doc strings)
+# ToDo: fix once hash is in internal type
 
 
 class MediaDescription(NamedTuple):
@@ -53,7 +56,7 @@ class MediaDescription(NamedTuple):
 
 
 class StacIO(pystac.StacIO):
-    """subclass of pystac.StacIO to properly handle metadata from deskriptors and work with FSMap
+    """subclass of pystac.StacIO to properly handle metadata from descriptors and work with FSMap
 
     Attributes:
         store (fsspec.FSMap): FSMap used to store data using fsspec
@@ -93,36 +96,36 @@ class StacIO(pystac.StacIO):
 
         self.store[str_dest] = txt.encode()
 
-    def gen_stac_item_kwargs(self, deskriptor: dict, item_metadata: dict) -> dict:
-        """generates metadata for the stac item for a deskriptor
+    def gen_stac_item_kwargs(self, descriptor: Descriptor, item_metadata: dict) -> dict:
+        """generates metadata for the stac item for a descriptor
 
         Args:
-            deskriptor (dict): deskriptor describing range of data
+            descriptor (Descriptor): descriptor describing range of data
             item_metadata (dict): additional metadata for item
 
         Raises:
-            RuntimeError: if deskriptor does not match expected format to generate metadata
+            RuntimeError: if descriptor does not match expected format to generate metadata
 
         Returns:
-            dict: stac metadata from deskriptor and item_metadata
+            dict: stac metadata from descriptor and item_metadata
         """
         if (
-            "longitude" not in deskriptor
-            or "start" not in deskriptor["longitude"]
-            or "end" not in deskriptor["longitude"]
-            or "latitude" not in deskriptor
-            or "start" not in deskriptor["latitude"]
-            or "end" not in deskriptor["latitude"]
-            or "time" not in deskriptor
-            or "variable" not in deskriptor
+            "longitude" not in descriptor
+            or not isinstance(descriptor["longitude"], Range)
+            or "latitude" not in descriptor
+            or not isinstance(descriptor["latitude"], Range)
+            or "time" not in descriptor
+            or not isinstance(descriptor["time"], DatetimeRange)
+            or "variable" not in descriptor
+            or "descriptor_hash" not in descriptor
         ):
-            raise RuntimeError("Given deskriptor does not match required metadata format")
+            raise RuntimeError("Given descriptor does not match required metadata format")
 
         bbox = [
-            deskriptor["longitude"]["start"],
-            deskriptor["latitude"]["end"],
-            deskriptor["longitude"]["end"],
-            deskriptor["latitude"]["start"],
+            descriptor["longitude"].start,
+            descriptor["latitude"].end,
+            descriptor["longitude"].end,
+            descriptor["latitude"].start,
         ]
         footprint = mapping(
             Polygon(
@@ -135,19 +138,19 @@ class StacIO(pystac.StacIO):
                 ]
             )
         )
-        start_time = deskriptor["time"]["start"].to_pydatetime()
-        end_time = deskriptor["time"]["end"].to_pydatetime()
-        variables = deskriptor["variable"]
+        start_time = descriptor["time"]["start"].to_pydatetime()
+        end_time = descriptor["time"]["end"].to_pydatetime()
+        variables = descriptor["variable"]
 
         kwargs = {
-            "id": deskriptor["deskriptor_hash"],
+            "id": descriptor["descriptor_hash"],
             "geometry": footprint,
             "bbox": bbox,
             "datetime": None,
             "start_datetime": start_time,
             "end_datetime": end_time,
             "properties": {
-                "description": self._gen_description(deskriptor),
+                "description": self._gen_description(descriptor),
                 "variables": variables,
             },
         }
@@ -163,20 +166,20 @@ class StacIO(pystac.StacIO):
 
         return kwargs
 
-    def _gen_description(self, deskriptor: dict) -> str:
+    def _gen_description(self, descriptor: Descriptor) -> str:
         """generate human readable description for STAC Item of chunk
 
         Args:
-            deskriptor (dict): deskriptor defining range of data
+            descriptor (Descriptor): descriptor defining range of data
 
         Returns:
             str: STAC Item description
         """
-        start_time = deskriptor["time"]["start"].isoformat()
-        end_time = deskriptor["time"]["end"].isoformat()
-        variable_string = ", ".join(deskriptor["variable"])
-        latitude_string = f"{deskriptor['latitude']['start']} to {deskriptor['latitude']['end']} latitude"
-        longitude_string = f"{deskriptor['longitude']['start']} to {deskriptor['longitude']['end']} longitude"
+        start_time = descriptor["time"].start.isoformat()
+        end_time = descriptor["time"].end.isoformat()
+        variable_string = ", ".join(descriptor["variable"])
+        latitude_string = f"{descriptor['latitude'].start} to {descriptor['latitude'].end} latitude"
+        longitude_string = f"{descriptor['longitude'].start} to {descriptor['longitude'].end} longitude"
 
         description = (
             f"This chunk contains data for the variable(s) {variable_string}, "

@@ -23,19 +23,20 @@ import fsspec
 import pystac
 from cachetools import Cache, LRUCache
 
-# TODO: can we implement our own hash function for deskriptors to reduce dependency on dask?
+# TODO: can we implement our own hash function for descriptors to reduce dependency on dask?
 from dask.base import tokenize
 
 from .core import task
 from .data_io import DataContainer, MediaDescription, StacIO
+from .descriptor import Descriptor
 from .utils import (
     NodeFailedError,
-    dict_update,
+    descriptor_update,
     get_segments,
 )
 
 # ToDo: Doc strings
-# ToDo: fix deskriptor types (then also in doc strings)
+# ToDo: fix descriptor types (then also in doc strings)
 
 
 @task()
@@ -71,73 +72,79 @@ class Persister:
         self._mutex = Lock()
         self.save_metadata = save_metadata
 
-    def configure(self, deskriptor: dict | None = None) -> dict:
-        deskriptor_hash = self.get_hash(deskriptor)
-        data_path = f"data/{deskriptor_hash}"
+    def configure(self, descriptor: Descriptor | None = None) -> Descriptor:
+        descriptor_hash = self.get_hash(descriptor)
+        data_path = f"data/{descriptor_hash}"
+
+        if descriptor._get_internal("self") is None:
+            descriptor._set_internal("self", {})
 
         # compute action defaults to passthrough
-        deskriptor["self"]["action"] = "passthrough"
+        descriptor._get_internal("self")["action"] = "passthrough"
 
-        if deskriptor["self"].get("bypass", False):
+        if descriptor._get_internal("self").get("bypass", False):
             # set to passthrough -> nothing will happen
-            return deskriptor
+            return descriptor
 
-        # propagate the deskriptor_hash to the compute function
-        deskriptor["self"]["deskriptor_hash"] = deskriptor_hash
+        # propagate the descriptor_hash to the compute function
+        descriptor._get_internal("self")["descriptor_hash"] = descriptor_hash
 
-        # reload and rewrite the chunk if deskriptored
-        if deskriptor["self"].get("force_update", False):
-            deskriptor["self"]["action"] = "store"
-            return deskriptor
+        # reload and rewrite the chunk if descriptored
+        if descriptor._get_internal("self").get("force_update", False):
+            descriptor._get_internal("self")["action"] = "store"
+            return descriptor
 
         with self._mutex:
-            if deskriptor["self"].get("use_memorycache", True) and data_path in self.cache:
-                deskriptor["remove_dependencies"] = True
+            if descriptor._get_internal("self").get("use_memorycache", True) and data_path in self.cache:
+                descriptor._set_internal("remove_dependencies", True)
                 # set the compute action to load
-                deskriptor["self"]["action"] = "load_from_cache"
-                return deskriptor
+                descriptor._get_internal("self")["action"] = "load_from_cache"
+                return descriptor
 
             if self.store is None:
-                return deskriptor
+                return descriptor
 
             # while holding the mutex, we need to check if the file exists
             if data_path in self.store:
                 # remove previous node since we are going to load from disk
-                deskriptor["remove_dependencies"] = True
+                descriptor._set_internal("remove_dependencies", True)
 
                 # set the compute action to load
-                deskriptor["self"]["action"] = "load"
-                return deskriptor
-            elif "fail/" + deskriptor_hash in self.store:
+                descriptor._get_internal("self")["action"] = "load"
+                return descriptor
+            elif "fail/" + descriptor_hash in self.store:
                 # remove previous node since we are going to load the fail info from disk
-                deskriptor["remove_dependencies"] = True
-                deskriptor["self"]["deskriptor_hash"] = "fail/" + deskriptor_hash
+                descriptor._set_internal("remove_dependencies", True)
+                descriptor._get_internal("self")["descriptor_hash"] = "fail/" + descriptor_hash
 
                 # set the compute action to load
-                deskriptor["self"]["action"] = "load"
-                return deskriptor
+                descriptor._get_internal("self")["action"] = "load"
+                return descriptor
 
             # TODO: check if the file will be written to already?
 
-            deskriptor["self"]["action"] = "store"
+            descriptor._get_internal("self")["action"] = "store"
 
-        return deskriptor
+        return descriptor
 
     # ToDo: Doc String and Make simpler
-    def compute(self, data: DataContainer | None = None, **deskriptor: dict) -> DataContainer:  # noqa: C901
-        if deskriptor["action"] == "passthrough":
+    def compute(self, data: DataContainer | None = None, **descriptor: Descriptor) -> DataContainer:  # noqa: C901
+        if descriptor._get_internal("self")["action"] == "passthrough":
             return data
 
         if self.store is not None:
             self.store.dirfs.mkdirs("data/", exist_ok=True)
-            data_path = f"data/{deskriptor['deskriptor_hash']}"
+            data_path = f"data/{descriptor._get_internal('descriptor_hash')}"
 
-        if deskriptor["action"] == "load_from_cache":
+        if descriptor._get_internal("self")["action"] == "load_from_cache":
             with self._mutex:
                 if data_path in self.cache:
                     cached = self.cache[data_path]
                     return cached
-        if deskriptor["action"] == "load" or deskriptor["action"] == "load_from_cache":
+        if (
+            descriptor._get_internal("self")["action"] == "load"
+            or descriptor._get_internal("self")["action"] == "load_from_cache"
+        ):
             f = self.store.dirfs.open(data_path)
             data = self.data_container.read(f)
 
@@ -145,7 +152,7 @@ class Persister:
                 self.cache[data_path] = data
 
             return data
-        elif deskriptor["action"] == "store":
+        elif descriptor._get_internal("self")["action"] == "store":
             with self._mutex:
                 self.cache[data_path] = data
 
@@ -159,7 +166,7 @@ class Persister:
                 # write to file
                 if isinstance(data, NodeFailedError):
                     self.store.dirfs.mkdirs("fail/", exist_ok=True)
-                    with self.store.dirfs.open("fail/" + deskriptor["deskriptor_hash"], "wb") as f:
+                    with self.store.dirfs.open("fail/" + descriptor._get_internal("descriptor_hash"), "wb") as f:
                         data.write(f)
 
                 else:
@@ -174,66 +181,69 @@ class Persister:
                         raise e
 
                     if self.save_metadata:
-                        self._save_metadata(deskriptor, item_metadata, data.file_info())
+                        self._save_metadata(descriptor, item_metadata, data.file_info())
 
             except Exception as e:
+                import traceback
+
+                traceback.print_exception(e.__class__, e, e.__traceback__)
                 raise NodeFailedError("Error during Persister") from e
 
             return data
         else:
             raise NodeFailedError("A bug in Persister. Please report.")
 
-    def is_valid(self, deskriptor: dict) -> bool | None:
-        """Checks if persisted object for `deskriptor`
+    def is_valid(self, descriptor: Descriptor) -> bool | None:
+        """Checks if persisted object for `descriptor`
         exists and is valid (i.e. is not of type NodeFailedException).
 
         Args:
-            deskriptor (dict): The deskriptor that should be checked
+            descriptor (Descriptor): The descriptor that should be checked
 
         Returns:
             boolean | None: Returns false if the persisted item is of type NodeFailedException
-                             Returns None if the deskriptor has not been persisted yet.
+                             Returns None if the descriptor has not been persisted yet.
         """
-        deskriptor_hash = self.get_hash(deskriptor)
+        descriptor_hash = self.get_hash(descriptor)
 
-        if "fail/" + deskriptor_hash in self.store:
+        if "fail/" + descriptor_hash in self.store:
             return False
 
-        if deskriptor_hash in self.store:
+        if descriptor_hash in self.store:
             return True
 
         return None
 
-    def get_hash(self, deskriptor: dict) -> str:
-        """returns the hash of the deskriptor
+    def get_hash(self, descriptor: Descriptor) -> str:
+        """returns the hash of the descriptor
 
         Args:
-            deskriptor (dict): deskriptor
+            descriptor (Descriptor): descriptor
 
         Returns:
             str: hash of the request
         """
-        r = {k: v for k, v in deskriptor.items() if k != "self"}
+        r = {k: v for k, v in descriptor.to_dict().items() if k != "self"}
         s = json.dumps(r, sort_keys=True, skipkeys=True, default=_string_timestamp)
-        deskriptor_hash = tokenize(s)
+        descriptor_hash = tokenize(s)
 
-        return deskriptor_hash
+        return descriptor_hash
 
-    def _save_metadata(self, deskriptor: dict, item_metadata: dict, file_info: MediaDescription) -> None:
+    def _save_metadata(self, descriptor: Descriptor, item_metadata: dict, file_info: MediaDescription) -> None:
         """saves metadata for given chunk using STAC (https://stacspec.org/)
 
         Args:
-            deskriptor (dict): the deskriptor containing the temporal and spacial boundaries
+            descriptor (Descriptor): the descriptor containing the temporal and spacial boundaries
             item_metadata (dict): additional metadata passed by loader to save in STAC item
             file_info (MediaDescription): information about the saved file
         """
 
-        kwargs = self.stac_io.gen_stac_item_kwargs(deskriptor, item_metadata)
+        kwargs = self.stac_io.gen_stac_item_kwargs(descriptor, item_metadata)
 
         item = pystac.Item(**kwargs)
 
         asset = pystac.Asset(
-            href=f"./../../data/{deskriptor['deskriptor_hash']}",
+            href=f"./../../data/{descriptor._get_internal('self')['descriptor_hash']}",
             description=file_info.description,
             media_type=file_info.media_type,
             roles=["data"],
@@ -280,19 +290,19 @@ class ChunkPersister:
         use_memorycache: bool = True,
         cache: Cache | None = None,
     ) -> None:
-        """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
-         or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
+        """Chunks every incoming dekriptor into subchunks if descriptor is larger than segment_slice
+         or extends the descriptor to the respective chunksize if descriptor is smaller than segment_slice
 
         Args:
             data_container (Type[DataContainer]): Type of DataContainer used
             store (fsspec.FSMap): store used for caching
             dim (str, optional): _description_. Defaults to "time".
             segment_slice (dict | Callable[..., dict], optional): dict containing an entry for each chunked dimension
-                each entry is the respective chunk size given in the units of the expected dimension of the deskriptor.
+                each entry is the respective chunk size given in the units of the expected dimension of the descriptor.
                 e.g. for a time dimension you can use pd.Timedelta. Defaults to None.
             dataset_scope (dict | Callable[...,dict], optional): The extend of the chunking.
-                If None, the incoming deskriptor will be used as the scope. If only select dimensions are given,
-                the scope for the other dimensions will be choosen from the incoming deskriptor. Defaults to None.
+                If None, the incoming descriptor will be used as the scope. If only select dimensions are given,
+                the scope for the other dimensions will be choosen from the incoming descriptor. Defaults to None.
             mode (str, optional): _description_. Defaults to "overlap".
             reference (dict, optional): _description_. Defaults to None.
             force_update (bool, optional): _description_. Defaults to False.
@@ -338,7 +348,7 @@ class ChunkPersister:
         if isinstance(store, str) or isinstance(store, Path):
             store = fsspec.get_mapper(store)
 
-        self.store = store or self.filesystem.get_mapper()
+        self.store = store if store is not None else self.filesystem.get_mapper()
 
         self.stac_io = StacIO(store=store)
 
@@ -364,20 +374,20 @@ class ChunkPersister:
     def __dask_tokenize__(self) -> tuple:
         return (ChunkPersister,)
 
-    def configure(self, deskriptor: dict | None = None) -> dict:
-        rs = deskriptor["self"]
+    def configure(self, descriptor: Descriptor | None = None) -> Descriptor:
+        rs = descriptor._get_internal("self")
         if rs.get("bypass", False):
-            return deskriptor
+            return descriptor
 
         def get_value(attr_name: str) -> Any:  # noqa: ANN401
-            # decide if we use the attribute provided in the deskriptor or
+            # decide if we use the attribute provided in the descriptor or
             # from a callback provided at initialization
             value = None
             if rs.get(attr_name, None) is None:
-                # there is no attribute in the deskriptor, check for callback
+                # there is no attribute in the descriptor, check for callback
                 callback = getattr(self, attr_name)
                 if callback is not None and callable(callback):
-                    value = callback(deskriptor)
+                    value = callback(descriptor)
                 else:
                     # not passing segment_stride is okay
                     if attr_name == "segment_stride":
@@ -401,14 +411,14 @@ class ChunkPersister:
             timestamps_as_strings=True,
             minimal_number_of_segments=1,
         )
-        cloned_deskriptors = []
+        cloned_descriptors = []
         cloned_persisters = []
         for segment in segments:
-            segment_deskriptor = deepcopy(deskriptor)
-            if "self" in segment_deskriptor:
-                del segment_deskriptor["self"]
-            dict_update(segment_deskriptor, segment)
-            cloned_deskriptors += [segment_deskriptor]
+            segment_descriptor = deepcopy(descriptor)
+            if "self" in segment_descriptor._deklare_attrs:
+                del segment_descriptor._deklare_attrs["self"]
+            descriptor_update(segment_descriptor, segment)
+            cloned_descriptors += [segment_descriptor]
             cloned_persister = Persister(
                 data_container=self.data_container,
                 store=self.store,
@@ -419,8 +429,8 @@ class ChunkPersister:
                 use_memorycache=self.use_memorycache,
             )
             cloned_persister.dask_key_name = self.dask_key_name + "_persister"
-            dict_update(
-                segment_deskriptor,
+            descriptor_update(
+                segment_descriptor,
                 {
                     "config": {
                         "keys": {self.dask_key_name + "_persister": {"force_update": rs.get("force_update", False)}}
@@ -430,13 +440,13 @@ class ChunkPersister:
             cloned_persisters += [cloned_persister.compute]
 
         # Insert predecessor
-        # new_deskriptor = {}
-        deskriptor["clone_dependencies"] = cloned_deskriptors
-        deskriptor["insert_predecessor"] = cloned_persisters
+        # new_descriptor = {}
+        descriptor._set_internal("clone_dependencies", cloned_descriptors)
+        descriptor._set_internal("insert_predecessor", cloned_persisters)
 
-        return deskriptor
+        return descriptor
 
-    def compute(self, *data: DataContainer | NodeFailedError, **deskriptor: dict) -> DataContainer:  # noqa: ARG002
+    def compute(self, *data: DataContainer | NodeFailedError, **descriptor: Descriptor) -> DataContainer:  # noqa: ARG002
         def unpack_list(inputlist: Iterable[NodeFailedError | DataContainer] | NodeFailedError | DataContainer) -> list:
             new_list = []
             for item in inputlist:
