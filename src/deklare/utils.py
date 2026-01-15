@@ -16,8 +16,7 @@ limitations under the License."""
 import itertools
 import math
 import warnings
-from typing import Any, Iterable, get_args, get_origin
-
+from typing import Any, Iterable, get_args
 
 import pandas as pd
 import xarray as xr
@@ -29,8 +28,6 @@ from pandas.core.tools.datetimes import DatetimeScalar
 
 from .core import KEY_SEP
 from .descriptor import DatetimeRange, Descriptor, Range
-
-# ToDo: Doc strings
 
 
 def base_name(name: str) -> str:
@@ -86,13 +83,11 @@ def descriptor_update(base: Descriptor | dict, update: dict, convert_nestedfroze
 
         if isinstance(base, Descriptor) and key in base:
             field_info = base.__pydantic_fields__[key]
-            if DatetimeRange in get_args(field_info.annotation) and isinstance(value, dict):
-                value = DatetimeRange(**value)
-            elif isinstance(value, dict):
-                for t in get_args(field_info.annotation):
-                    if issubclass(t, Range):
-                        value = Range(**value)
-                        break
+            if isinstance(value, dict):
+                if DatetimeRange in get_args(field_info.annotation):
+                    value = DatetimeRange(**value)
+                elif any(issubclass(t, Range) for t in get_args(field_info.annotation)) > 0:
+                    value = Range(**value)
 
         if isinstance(value, dict):
             if key not in base:

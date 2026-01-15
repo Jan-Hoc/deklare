@@ -59,7 +59,7 @@ def deklare_flow(
         """wrapper for query function for classes with self attribute"""
         return query(descriptor)
 
-    @accept_dict_descriptor(descriptor_cls=template_descriptor)
+    @accept_dict_descriptor(arg_name="descriptor", descriptor_cls=template_descriptor)
     def query(descriptor: Descriptor) -> Any:  # noqa: ANN401
         """query function to get data corresponding to descriptor"""
         if config_descriptor:

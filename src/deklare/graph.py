@@ -27,11 +27,8 @@ from dask.typing import Graph
 from dask.utils import apply
 
 from .core import KEY_SEP, Node
-from .descriptor import Descriptor, accept_dict_descriptor
+from .descriptor import Descriptor
 from .utils import NodeFailedError, base_name
-
-# ToDo: Doc strings
-# ToDo: fix descriptor types (then also in doc strings)
 
 FUNCTION = 1
 DATA = 2
@@ -97,7 +94,6 @@ def generate_clone_key(current_node_name: str, to_clone_key: str, clone_id: str)
 
 # @profile
 # ToDo: break into multiple smaller functions
-# ToDo: check descriptor types
 def configuration(  # noqa: C901
     delayed: Delayed | list[Delayed],
     descriptors: Descriptor | list[Descriptor],
@@ -233,10 +229,10 @@ def configuration(  # noqa: C901
                     clone_work = new_clone_work
             dsk_k = list(dsk_dict[clone_k])
             dsk_k[DATA] = k_in_keys
-            dsk_k[DESCRIPTOR] = descriptor
+            dsk_k[DESCRIPTOR] = (descriptor,)
             dsk_dict[clone_k] = tuple(dsk_k)
 
-            descriptors[clone_k] = [descriptor]
+            descriptors[clone_k] = (descriptor,)
             keys += [clone_k]
 
     remove = {k: False for k in work}
@@ -252,7 +248,7 @@ def configuration(  # noqa: C901
             # check if we have collected all dependencies so far
             # we will come back to this node another time
             # TODO: make a better check for the case when dependants[k] is a set. why is it a set in the first place..?
-            if not isinstance(dependants[key], set):
+            if key in dependants and not isinstance(dependants[key], set):
                 continue
 
             # set configuration for k
@@ -287,7 +283,7 @@ def configuration(  # noqa: C901
                         "remove_dependency",
                         "remove_dependencies",
                     ]
-                    new_descriptor = r.__self__.from_dict(
+                    new_descriptor = r.__class__.from_dict(
                         {k: v for k, v in r.to_dict().items() if k not in ignored_keys}
                     )
                     new_descriptor._deklare_attrs = {
@@ -304,11 +300,11 @@ def configuration(  # noqa: C901
             # User must use one descriptor with `clone_dependencies` and `insert_predecessor` keys
             insert_predecessor = []
             if isinstance(new_descriptor, Descriptor):
-                if "insert_predecessor" in new_descriptor._deklare_attrs:
-                    insert_predecessor = new_descriptor._get_internal("insert_predecessor")
+                if "insert_predecessor" in new_descriptor.config:
+                    insert_predecessor = new_descriptor.config["insert_predecessor"]
 
                 if insert_predecessor:
-                    del new_descriptor._deklare_attrs["insert_predecessor"]
+                    del new_descriptor.config["insert_predecessor"]
 
             current_deps = get_dependencies(dsk_dict, key, as_list=True)
 
@@ -316,7 +312,7 @@ def configuration(  # noqa: C901
             if len(dsk_dict[key]) > DATA:
                 k_in_keys = deepcopy(dsk_dict[key][DATA])  # [DATA] equals in_keys in dict
 
-            clone_dependencies = new_descriptor if isinstance(new_descriptor, list) else [new_descriptor]
+            clone_dependencies = new_descriptor if isinstance(new_descriptor, list) else (new_descriptor,)
 
             # check if any of our current dependencies already has to fulfil a descriptor
             # since the descriptor's might collide we should just duplicate it
@@ -334,17 +330,17 @@ def configuration(  # noqa: C901
 
             # if it's a list it automatically clones it, else the user could use the clone_dependencies to clone
             if isinstance(new_descriptor, Descriptor):
-                if new_descriptor._get_internal("clone_dependencies") or False:
+                if new_descriptor.get_config("clone_dependencies", False):
                     clone = True
                     k_in_keys = []
-                    clone_dependencies = new_descriptor._get_internal("clone_dependencies")
-                    del new_descriptor._deklare_attrs["clone_dependencies"]
+                    clone_dependencies = new_descriptor.config["clone_dependencies"]
+                    del new_descriptor.config["clone_dependencies"]
 
-                elif new_descriptor._get_internal("requires_descriptor") or False:
-                    del new_descriptor._deklare_attrs["requires_descriptor"]
-                    input_descriptors[key] = new_descriptor._get_internal("self")
+                elif new_descriptor.get_config("requires_descriptor", False):
+                    del new_descriptor.config["requires_descriptor"]
+                    input_descriptors[key] = new_descriptor
 
-            clone_dependencies = [dep for dep in clone_dependencies if dep]
+            clone_dependencies = tuple([dep for dep in clone_dependencies if dep])
 
             for clone_id, descriptor in enumerate(clone_dependencies):
                 if clone:
@@ -360,7 +356,7 @@ def configuration(  # noqa: C901
                         pre_k = tokenize([key, "deklare_pre", clone_id])
                         if hasattr(pre_function, "__self__") and hasattr(pre_function.__self__, "dask_key_name"):
                             pre_k = pre_function.__self__.dask_key_name + KEY_SEP + pre_k
-                        descriptors[pre_k] = [pre_descriptor]
+                        descriptors[pre_k] = (pre_descriptor,)
                         dsk_dict[pre_k] = [apply, pre_function, [], {}]
                         pre_in_keys = []
 
@@ -478,7 +474,7 @@ def configuration(  # noqa: C901
         work = new_work
 
     # Assembling the configured new graph
-    out = {k: dsk_dict[-k] for k in out_keys if not remove[k]}
+    out = {k: dsk_dict[k] for k in out_keys if not remove[k]}
 
     # After we have acquired all descriptors we can input the required_descriptors as a input node to the requiring node
     # we assume that the last argument is the descriptor
@@ -508,17 +504,17 @@ def configuration(  # noqa: C901
                     my_dict[item[0]] = item[1]
                 my_dict = {item[0]: item[1] for item in out[key][DESCRIPTOR][1]}
                 my_dict.update(input_descriptors[key])
-                out[key] = out[key][:DESCRIPTOR] + (my_dict,)
+                out[key] = out[key][:DESCRIPTOR] + ({"descriptor": descriptor.__class__(**my_dict)},)
             else:
                 # replace the last entry
-                out[key] = out[key][:DESCRIPTOR] + (input_descriptors[key],)
+                out[key] = out[key][:DESCRIPTOR] + ({"descriptor": input_descriptors[key]},)
 
         # # TODO: verify that we can ignore this case
         # elif isinstance(out[k][DESCRIPTOR], dict):
         #     out[k] = out[k][:DESCRIPTOR] + (copy(out[k][DESCRIPTOR]) | copy(input_descriptors[k]),)
         else:
             # replace the last entry
-            out[key] = out[key][:DESCRIPTOR] + (input_descriptors[key],)
+            out[key] = out[key][:DESCRIPTOR] + ({"descriptor": input_descriptors[key]},)
 
         # TODO: we might dask.delayed(out[k][DESCRIPTOR]) here
 
@@ -580,7 +576,16 @@ def _normalize_node(key: str, dsk_dict: dict) -> None:
     # any node that does not have the following structure will get it
     # (apply, func, args, kwargs)
     if dsk_dict[key][0] is not apply:
-        dsk_dict[key] = (apply, dsk_dict[key][0], list(dsk_dict[key][1:]), {})
+        args = []
+        kwargs = {}
+
+        if len(dsk_dict[key]) > 2:
+            args = list(dsk_dict[key][1:-1])
+            kwargs["descriptor"] = dsk_dict[key][-1]
+        else:
+            args = list(dsk_dict[key][1:])
+
+        dsk_dict[key] = (apply, dsk_dict[key][0], args, kwargs)
 
 
 def _invert_task_graph(keys: list, dsk_dict: dict) -> tuple[dict, set]:

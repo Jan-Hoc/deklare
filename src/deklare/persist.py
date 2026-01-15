@@ -28,15 +28,12 @@ from dask.base import tokenize
 
 from .core import task
 from .data_io import DataContainer, MediaDescription, StacIO
-from .descriptor import Descriptor
+from .descriptor import Descriptor, accept_dict_descriptor
 from .utils import (
     NodeFailedError,
     descriptor_update,
     get_segments,
 )
-
-# ToDo: Doc strings
-# ToDo: fix descriptor types (then also in doc strings)
 
 
 @task()
@@ -53,7 +50,7 @@ class Persister:
         global_lock: Lock = None,
         save_metadata: bool = False,
     ) -> None:
-        super().__init__(force_update=force_update, use_memorycache=use_memorycache)
+        super().__init__(Descriptor(config={"force_update": force_update, "use_memorycache": use_memorycache}))
         if isinstance(store, str) or isinstance(store, Path):
             store = fsspec.get_mapper(store)
         self.store = store
@@ -72,33 +69,30 @@ class Persister:
         self._mutex = Lock()
         self.save_metadata = save_metadata
 
-    def configure(self, descriptor: Descriptor | None = None) -> Descriptor:
+    def configure(self, descriptor: Descriptor) -> Descriptor:
         descriptor_hash = self.get_hash(descriptor)
         data_path = f"data/{descriptor_hash}"
 
-        if descriptor._get_internal("self") is None:
-            descriptor._set_internal("self", {})
-
         # compute action defaults to passthrough
-        descriptor._get_internal("self")["action"] = "passthrough"
+        descriptor.config["action"] = "passthrough"
 
-        if descriptor._get_internal("self").get("bypass", False):
+        if descriptor.get_config("bypass", False):
             # set to passthrough -> nothing will happen
             return descriptor
 
         # propagate the descriptor_hash to the compute function
-        descriptor._get_internal("self")["descriptor_hash"] = descriptor_hash
+        descriptor.config["descriptor_hash"] = descriptor_hash
 
         # reload and rewrite the chunk if descriptored
-        if descriptor._get_internal("self").get("force_update", False):
-            descriptor._get_internal("self")["action"] = "store"
+        if descriptor.get_config("force_update", False):
+            descriptor.config["action"] = "store"
             return descriptor
 
         with self._mutex:
-            if descriptor._get_internal("self").get("use_memorycache", True) and data_path in self.cache:
-                descriptor._set_internal("remove_dependencies", True)
+            if descriptor.get_config("use_memorycache", True) and data_path in self.cache:
+                descriptor.config["remove_dependencies"] = True
                 # set the compute action to load
-                descriptor._get_internal("self")["action"] = "load_from_cache"
+                descriptor.config["action"] = "load_from_cache"
                 return descriptor
 
             if self.store is None:
@@ -107,44 +101,43 @@ class Persister:
             # while holding the mutex, we need to check if the file exists
             if data_path in self.store:
                 # remove previous node since we are going to load from disk
-                descriptor._set_internal("remove_dependencies", True)
+                descriptor.config["remove_dependencies"] = True
 
                 # set the compute action to load
-                descriptor._get_internal("self")["action"] = "load"
+                descriptor.config["action"] = "load"
                 return descriptor
             elif "fail/" + descriptor_hash in self.store:
                 # remove previous node since we are going to load the fail info from disk
-                descriptor._set_internal("remove_dependencies", True)
-                descriptor._get_internal("self")["descriptor_hash"] = "fail/" + descriptor_hash
+                descriptor.config["remove_dependencies"] = True
+                descriptor.config["descriptor_hash"] = "fail/" + descriptor_hash
 
                 # set the compute action to load
-                descriptor._get_internal("self")["action"] = "load"
+                descriptor.config["action"] = "load"
                 return descriptor
 
             # TODO: check if the file will be written to already?
 
-            descriptor._get_internal("self")["action"] = "store"
+            descriptor.config["action"] = "store"
 
         return descriptor
 
-    # ToDo: Doc String and Make simpler
-    def compute(self, data: DataContainer | None = None, **descriptor: Descriptor) -> DataContainer:  # noqa: C901
-        if descriptor._get_internal("self")["action"] == "passthrough":
+    @accept_dict_descriptor(arg_name="descriptor")
+    def compute(self, data: DataContainer | None, descriptor: Descriptor) -> DataContainer:  # noqa: C901
+        descriptor = descriptor or Descriptor()
+
+        if descriptor.config["action"] == "passthrough":
             return data
 
         if self.store is not None:
             self.store.dirfs.mkdirs("data/", exist_ok=True)
-            data_path = f"data/{descriptor._get_internal('descriptor_hash')}"
+            data_path = f"data/{descriptor.config['descriptor_hash']}"
 
-        if descriptor._get_internal("self")["action"] == "load_from_cache":
+        if descriptor.config["action"] == "load_from_cache":
             with self._mutex:
                 if data_path in self.cache:
                     cached = self.cache[data_path]
                     return cached
-        if (
-            descriptor._get_internal("self")["action"] == "load"
-            or descriptor._get_internal("self")["action"] == "load_from_cache"
-        ):
+        if descriptor.config["action"] == "load" or descriptor.config["action"] == "load_from_cache":
             f = self.store.dirfs.open(data_path)
             data = self.data_container.read(f)
 
@@ -152,7 +145,7 @@ class Persister:
                 self.cache[data_path] = data
 
             return data
-        elif descriptor._get_internal("self")["action"] == "store":
+        elif descriptor.config["action"] == "store":
             with self._mutex:
                 self.cache[data_path] = data
 
@@ -166,7 +159,7 @@ class Persister:
                 # write to file
                 if isinstance(data, NodeFailedError):
                     self.store.dirfs.mkdirs("fail/", exist_ok=True)
-                    with self.store.dirfs.open("fail/" + descriptor._get_internal("descriptor_hash"), "wb") as f:
+                    with self.store.dirfs.open("fail/" + descriptor.config("descriptor_hash"), "wb") as f:
                         data.write(f)
 
                 else:
@@ -223,7 +216,7 @@ class Persister:
         Returns:
             str: hash of the request
         """
-        r = {k: v for k, v in descriptor.to_dict().items() if k != "self"}
+        r = {k: v for k, v in descriptor.to_dict().items() if k != "self" and k != "config"}
         s = json.dumps(r, sort_keys=True, skipkeys=True, default=_string_timestamp)
         descriptor_hash = tokenize(s)
 
@@ -243,7 +236,7 @@ class Persister:
         item = pystac.Item(**kwargs)
 
         asset = pystac.Asset(
-            href=f"./../../data/{descriptor._get_internal('self')['descriptor_hash']}",
+            href=f"./../../data/{descriptor.config['descriptor_hash']}",
             description=file_info.description,
             media_type=file_info.media_type,
             roles=["data"],
@@ -270,7 +263,6 @@ def _string_timestamp(o: object) -> str:
         return str(o)
 
 
-# ToDo: Fix doc string
 @task()
 class ChunkPersister:
     def __init__(
@@ -279,11 +271,11 @@ class ChunkPersister:
         store: fsspec.FSMap | None = None,
         filesystem: fsspec.AbstractFileSystem | None = None,
         dim: str = "time",
-        segment_slice: dict | Callable[..., dict] = None,
-        segment_stride: dict | Callable[..., dict] = None,
-        dataset_scope: dict | Callable[..., dict] = None,
+        segment_slice: dict | Callable[..., dict] | None = None,
+        segment_stride: dict | Callable[..., dict] | None = None,
+        dataset_scope: dict | Callable[..., dict] | None = None,
         mode: str = "overlap",
-        reference: dict = None,
+        reference: dict | None = None,
         force_update: bool = False,
         collection_metadata: dict | None = None,
         save_metadata: bool = False,
@@ -331,13 +323,17 @@ class ChunkPersister:
         self.save_metadata = save_metadata
 
         super().__init__(
-            dim=dim,
-            segment_slice=segment_slice,
-            segment_stride=segment_stride,
-            dataset_scope=dataset_scope,
-            mode=mode,
-            reference=reference,
-            force_update=force_update,
+            Descriptor(
+                config={
+                    "dim": dim,
+                    "segment_slice": segment_slice,
+                    "segment_stride": segment_stride,
+                    "dataset_scope": dataset_scope,
+                    "mode": mode,
+                    "reference": reference,
+                    "force_update": force_update,
+                }
+            )
         )
 
         if filesystem is None and store is None:
@@ -374,8 +370,9 @@ class ChunkPersister:
     def __dask_tokenize__(self) -> tuple:
         return (ChunkPersister,)
 
-    def configure(self, descriptor: Descriptor | None = None) -> Descriptor:
-        rs = descriptor._get_internal("self")
+    def configure(self, descriptor: Descriptor) -> Descriptor:
+        rs = descriptor.config
+        rs.update(self.config.config)
         if rs.get("bypass", False):
             return descriptor
 
@@ -385,14 +382,14 @@ class ChunkPersister:
             value = None
             if rs.get(attr_name, None) is None:
                 # there is no attribute in the descriptor, check for callback
-                callback = getattr(self, attr_name)
+                callback = self.config.config.get(attr_name, None)
                 if callback is not None and callable(callback):
                     value = callback(descriptor)
                 else:
                     # not passing segment_stride is okay
                     if attr_name == "segment_stride":
                         return None
-                    raise RuntimeError("No valid {attr_name} provided")
+                    raise RuntimeError(f"No valid {attr_name} provided")
             else:
                 value = rs[attr_name]
             return value
@@ -441,12 +438,12 @@ class ChunkPersister:
 
         # Insert predecessor
         # new_descriptor = {}
-        descriptor._set_internal("clone_dependencies", cloned_descriptors)
-        descriptor._set_internal("insert_predecessor", cloned_persisters)
+        descriptor.config["clone_dependencies"] = cloned_descriptors
+        descriptor.config["insert_predecessor"] = cloned_persisters
 
         return descriptor
 
-    def compute(self, *data: DataContainer | NodeFailedError, **descriptor: Descriptor) -> DataContainer:  # noqa: ARG002
+    def compute(self, *data: DataContainer | NodeFailedError, descriptor: Descriptor | None = None) -> DataContainer:  # noqa: ARG002
         def unpack_list(inputlist: Iterable[NodeFailedError | DataContainer] | NodeFailedError | DataContainer) -> list:
             new_list = []
             for item in inputlist:

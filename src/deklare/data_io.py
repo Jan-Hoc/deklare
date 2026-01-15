@@ -39,9 +39,6 @@ Index = TypeVar(
     dict[str, Any],
 )
 
-# ToDo: fix descriptor types (then also in doc strings)
-# ToDo: fix once hash is in internal type
-
 
 class MediaDescription(NamedTuple):
     """more precise return type to avoid confusion
@@ -117,7 +114,7 @@ class StacIO(pystac.StacIO):
             or "time" not in descriptor
             or not isinstance(descriptor["time"], DatetimeRange)
             or "variable" not in descriptor
-            or "descriptor_hash" not in descriptor
+            or "descriptor_hash" not in descriptor.config
         ):
             raise RuntimeError("Given descriptor does not match required metadata format")
 
@@ -138,12 +135,12 @@ class StacIO(pystac.StacIO):
                 ]
             )
         )
-        start_time = descriptor["time"]["start"].to_pydatetime()
-        end_time = descriptor["time"]["end"].to_pydatetime()
+        start_time = descriptor["time"].start.to_pydatetime()
+        end_time = descriptor["time"].end.to_pydatetime()
         variables = descriptor["variable"]
 
         kwargs = {
-            "id": descriptor["descriptor_hash"],
+            "id": descriptor.config["descriptor_hash"],
             "geometry": footprint,
             "bbox": bbox,
             "datetime": None,
@@ -158,7 +155,10 @@ class StacIO(pystac.StacIO):
         blocked_keys = kwargs.keys()
         for k, v in item_metadata.items():
             if k not in blocked_keys:
-                kwargs[k] = v
+                if k == "assets":
+                    kwargs[k] = {k_a: pystac.Asset(**a) for k_a, a in v.items()}
+                else:
+                    kwargs[k] = v
             elif k == "properties" and isinstance(v, dict):
                 for k_p, v_p in v.items():
                     if k_p != "variables":

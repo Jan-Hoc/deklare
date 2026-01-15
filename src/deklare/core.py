@@ -26,7 +26,7 @@ import dask.delayed
 from dask.delayed import Delayed
 from dask.typing import Graph
 
-from .descriptor import Descriptor, accept_dict_descriptor
+from .descriptor import Descriptor
 
 KEY_SEP = "+"
 PROTECTED_DESCRIPTOR_KEYS = ["self", "config"]
@@ -77,7 +77,7 @@ class TaskGraphCreator:
 
     def __exit__(
         self, _type: BaseException | None, _value: BaseException | None, traceback: TracebackType | None
-    ) -> bool | None:
+    ) -> None:
         global is_enabled
         is_enabled = False
         FlowContext.reset()
@@ -97,18 +97,8 @@ class Node(object):
     _name: str | None
     config: Descriptor
 
-    def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401
-        self.config = locals().copy()
-        # FIXME: This works but there are better solutions!
-        while "kwargs" in self.config:
-            if "kwargs" not in self.config["kwargs"]:
-                self.config.update(self.config["kwargs"])
-                break
-            self.config.update(self.config["kwargs"])
-
-        del self.config["kwargs"]
-        del self.config["self"]
-
+    def __init__(self, config: Descriptor | None = None) -> None:  # noqa: ANN401
+        self.config = config or Descriptor()
         self._name = None
 
     def merge_config(self, descriptor: Descriptor) -> Descriptor:
@@ -167,7 +157,7 @@ class Node(object):
         merged_descriptor = self.merge_config(descriptor)
 
         # set default
-        merged_descriptor._set_internal("requires_descriptor", True)
+        merged_descriptor.config["requires_descriptor"] = True
 
         return merged_descriptor
 
@@ -229,13 +219,11 @@ class Node(object):
         """
         new_descriptor = deepcopy(descriptor)
 
-        new_descriptor._set_internal("self", {})
         if hasattr(self, "config"):
-            new_descriptor._get_internal("self").update(deepcopy(self.config))
+            new_descriptor.config.update(deepcopy(self.config.config))
 
-        for key in descriptor:
-            if key not in PROTECTED_DESCRIPTOR_KEYS:
-                new_descriptor._get_internal("self")[key] = descriptor[key]
+        new_descriptor._set_internal("self", {})
+        new_descriptor._get_internal("self").update(self.config.model_dump(exclude=PROTECTED_DESCRIPTOR_KEYS))
 
         return new_descriptor
 
@@ -272,7 +260,7 @@ class Node(object):
             if "keys" in old_descriptor.config:
                 if self.dask_key_name in old_descriptor.config["keys"]:
                     new_descriptor._get_internal("self").update(
-                        deepcopy(old_descriptor.config["types"][self.dask_key_name])
+                        deepcopy(old_descriptor.config["keys"][self.dask_key_name])
                     )
 
                     # TODO: It should be safe to remove these keys from the new_descriptor!?
@@ -337,8 +325,10 @@ def _wrap_class(cls: type, name: str | None = None) -> type:
 
     # Define __init__ for the new class
     def new_init(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN001, ANN401
-        super(type(self), self).__init__(*args, **kwargs)
+        cls.__init__(self, *args, **kwargs)
+
         self._name = getattr(self, "_name", None) or name
+        self.config = getattr(self, "config", None) or Descriptor()
 
     new_cls_dict["__init__"] = new_init
 

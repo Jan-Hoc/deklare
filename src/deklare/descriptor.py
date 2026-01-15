@@ -33,7 +33,7 @@ def _to_datetime(v: DatetimeScalar) -> pd.Timestamp:
     return pd.to_datetime(v, utc=True).tz_localize(None)
 
 
-DatetimeTT = TypeVar("DatetimeTT", int, float, str, datetime.date, datetime.datetime, type(np.datetime64))
+DatetimeTT = TypeVar("DatetimeTT", int, float, str, datetime.date, datetime.datetime, type(np.datetime64))  # type: ignore
 
 
 DateTimeType = Annotated[DatetimeTT, AfterValidator(_to_datetime)]
@@ -67,9 +67,6 @@ def _transform_to_nested(input_dict: dict, separator: str = ".") -> dict:
     return transformed
 
 
-# ToDo:
-#  - add decorator to relevant functions in __init__.py
-#  - change all functions to only accept Descriptor and not dict and add Decorator if necessary
 class Descriptor(BaseModel, validate_assignment=True):
     """Descriptor to represent queries for data
 
@@ -137,7 +134,8 @@ class Descriptor(BaseModel, validate_assignment=True):
         Args:
             other (Descriptor): descriptor to use to update instance
         """
-        self.config.update(other.config)
+        for k, v in other.model_dump().items():
+            setattr(self, k, v)
 
     def __getitem__(self, key: str) -> Any:  # noqa: ANN401
         """returns the attribute of the descriptor
@@ -157,16 +155,17 @@ class Descriptor(BaseModel, validate_assignment=True):
 
         raise KeyError(key)
 
-    def _get_internal(self, key: str) -> Any:  # noqa: ANN401
+    def _get_internal(self, key: str, default: Any = None) -> Any:  # noqa: ANN401
         """returns the internal attribute corresponding to key
 
         Args:
             key (str): key of arg
+            default (Any): (defaults to None) default value to return if key is not present
 
         Returns:
             Any: value corresponding to key or None of not present
         """
-        return self._deklare_attrs[key]
+        return self._deklare_attrs.get(key, default)
 
     def __setitem__(self, key: str, value: Any) -> None:  # noqa: ANN401
         """sets the attribute of the descriptor
@@ -248,7 +247,7 @@ class Descriptor(BaseModel, validate_assignment=True):
     # ToDo: find a cleaner method than converting to dict and back
     @classmethod
     def update_from_config_dict(cls, descriptor: Self | dict, config: Self | dict) -> Self:
-        """checks if descriptor has config defaults defined in descriptor['config']['config']
+        """checks if descriptor has config defaults defined in descriptor['config']
         replaces values in config if not present in descriptor
 
         Args:
@@ -265,14 +264,9 @@ class Descriptor(BaseModel, validate_assignment=True):
             config = config.to_dict()
 
         if "config" not in descriptor:
-            return descriptor
+            return cls.from_dict(descriptor)
 
         config_keys = descriptor["config"]
-
-        if "config" not in config_keys:
-            return descriptor
-
-        config_keys = config_keys["config"]
 
         for key, entry in config_keys.items():
             if key not in config:
@@ -294,7 +288,6 @@ class PermissiveDescriptor(Descriptor):
 
     model_config = ConfigDict(extra="allow")
 
-    # ToDo: fix with internal
     def __getitem__(self, key: str) -> Any:  # noqa: ANN401
         """returns the attribute of the descriptor
 
@@ -349,6 +342,31 @@ class PermissiveDescriptor(Descriptor):
         """
         yield from list(self.__pydantic_fields__.keys()) + list(self.__pydantic_extra__.keys())
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """create descriptor from data
+
+        Args:
+            data (dict[str, Any]): data to use to create descriptor
+
+        Returns:
+            Self: containing data
+        """
+        kwargs = {}
+
+        data = _transform_to_nested(data)
+
+        for key, value in data.items():
+            field_info = cls.model_fields[key]
+            if DatetimeRange in get_args(field_info.annotation) and isinstance(value, dict):
+                kwargs[key] = DatetimeRange(**value)
+            elif Range in get_args(field_info.annotation) and isinstance(value, dict):
+                kwargs[key] = Range(**value)
+            else:
+                kwargs[key] = value
+
+        return cls(**kwargs)
+
 
 def accept_dict_descriptor(
     arg_name: str | Iterable[str] = "descriptor", descriptor_cls: type[Descriptor] | None = PermissiveDescriptor
@@ -380,7 +398,7 @@ def accept_dict_descriptor(
                     if isinstance(val, dict):
                         bound.arguments[arg] = descriptor_cls.from_dict(val)
 
-            return fn(*bound.args, **bound.kwargs)
+            return fn(**bound.arguments)
 
         return inner_wrapper
 
