@@ -28,16 +28,16 @@ def deklare_flow(flow, templateDeskriptor: Deskriptor = None):
     def deklare_flow_function(self, deskriptor):
         return compute(flow_graph, deskriptor)
 
-    def query_class(self, deskriptor):
-        return query(deskriptor)
+    def query_class(self, deskriptor, plan=False):
+        return query(deskriptor, plan=plan)
 
-    def query(deskriptor):
+    def query(deskriptor, plan=False):
         if templateDeskriptor:
             if isinstance(deskriptor,(tuple,list)):
                 deskriptor = [templateDeskriptor.from_dict(d).to_dict() for d in deskriptor]
             else:
                 deskriptor = templateDeskriptor.from_dict(deskriptor).to_dict()
-        return compute(flow_graph, deskriptor)
+        return compute(flow_graph, deskriptor, plan=plan)
 
     if hasattr(flow, "__self__") and flow.__self__ is not None:
         flow.query = query_class

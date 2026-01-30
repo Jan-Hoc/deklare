@@ -19,6 +19,7 @@ import warnings
 import pandas as pd
 from .deskribe import Range
 import math
+from datetime import datetime
 
 from .graph import base_name
 
@@ -36,6 +37,8 @@ def indexers_to_slices(indexers):
     return new_indexers
 def exclusive_indexing(x, indexers):
     for k, v in indexers.items():
+        if not isinstance(v,dict):
+            continue
         end_val = v.get("end")
         
         if k not in x.coords or end_val is None:
@@ -134,8 +137,10 @@ def to_datetime(x, **kwargs):
 
 
 def is_datetime(x):
+    """Checks if input is a datetime-like scalar or array."""
+    if isinstance(x, (pd.Timestamp, datetime)): # check also for , np.datetime64
+        return True
     return pd.api.types.is_datetime64_any_dtype(x)
-
 
 def to_datetime_conditional(x, condition=True, **kwargs):
     # converts x to datetime if condition is true or the object in condition is datetime or timedelta
@@ -214,21 +219,30 @@ def get_segments(
             )
 
             if mode[dim] == "overlap":
-                # TODO: add options for closed and open intervals
-                # first get the lowest that window that still overlaps with our segment
-                segment_start = (
-                    segment_start
-                    - math.floor(_segment_slice / _segment_stride) * _segment_stride
-                )
-                # then align to the grid if necessary
-                if dim in reference:
-                    ref_dim = to_datetime_conditional(reference[dim], _segment_slice)
-                    segment_start = (
-                        math.ceil((segment_start - ref_dim) / _segment_stride)
-                        * _segment_stride
-                        + ref_dim
-                    )
+                # 1. Determine the "epsilon" (smallest unit) for the current data type
+                if is_datetime(segment_start):
+                    epsilon = pd.Timedelta(nanoseconds=1)
+                else:
+                    epsilon = 1 if isinstance(segment_start, int) else 1e-9
 
+                # 2. Handle reference alignment only if it exists
+                ref_val = 0
+                if dim in reference:
+                    ref_val = to_datetime_conditional(reference[dim], _segment_slice)
+                
+                # 3. Calculate how many strides to back up.
+                # We subtract epsilon to ensure that if segment_start is EXACTLY on 
+                # the boundary of the next window, we don't count it as an overlap.
+                num_strides = math.floor((segment_start - ref_val - epsilon) / _segment_stride)
+                segment_start = ref_val + (num_strides * _segment_stride)
+
+                # 4. Optional: Grid alignment (only if reference is provided)
+                if dim in reference:
+                    segment_start = (
+                        math.ceil((segment_start - ref_val) / _segment_stride)
+                        * _segment_stride
+                        + ref_val
+                    )
             elif mode[dim] == "fit":
                 if dim in reference:
                     ref_dim = to_datetime_conditional(reference[dim], _segment_slice)
@@ -244,15 +258,22 @@ def get_segments(
             else:
                 RuntimeError(f"Unknown mode {mode[dim]}. It must be `fit` or `overlap`")
 
-        if isinstance(
-            segment_slice[dim], pd.Timedelta
-        ):  # or isinstance(segment_slice[dim], dt.timedelta):
-            # TODO: change when xarray #3291 is fixed
-            iterator = pd.date_range(segment_start, segment_end, freq=_segment_stride)
+        if isinstance(segment_slice[dim], pd.Timedelta):
+            # Determine the smallest possible step to make the end exclusive
+            epsilon = pd.Timedelta(nanoseconds=1)
+            
+            # We stop at (segment_end - epsilon) to ensure segment_end is never 
+            # included as a 'start' point.
+            iterator = pd.date_range(
+                start=segment_start, 
+                end=segment_end - epsilon, 
+                freq=_segment_stride
+            )
             segment_end = pd.to_datetime(segment_end)
         else:
-            iterator = range(int(segment_start), int(segment_end), _segment_stride)
-
+            # Python's range(start, stop) is already exclusive of 'stop'
+            iterator = range(int(segment_start), int(segment_end), int(_segment_stride))
+            
         slices = []
         for start in iterator:
             end = start + _segment_slice
