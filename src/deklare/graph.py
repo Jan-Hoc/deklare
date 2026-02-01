@@ -878,10 +878,11 @@ def optimize(delayed, keys=None, dask_optimize=False):
     return collection
 
 
-def compute(graph, deskriptor):
+def compute(graph, deskriptor, plan=False):
     configured_graph = configuration(graph, deskriptor)
     # dsk, dsk_keys = dask.base._extract_graph_and_keys([configured_graph])
-
+    if plan:
+        return configured_graph
     computed_result = dask.compute(configured_graph)[0]
     return computed_result
 

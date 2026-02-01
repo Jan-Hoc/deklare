@@ -492,7 +492,6 @@ class Persister:
             r, sort_keys=True, skipkeys=True, default=Persister._string_timestamp
         )
         deskriptor_hash = tokenize(s)
-        print(r,s)
 
         return deskriptor_hash
 

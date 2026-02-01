@@ -185,7 +185,6 @@ def get_segments(
         dataset_scope_dim = dataset_scope[dim]
         if not isinstance(dataset_scope_dim, (list, Range, dict)):
             dataset_scope_dim = [dataset_scope_dim]
-
         if isinstance(dataset_scope_dim, list):
             segment_start = 0
             segment_end = len(dataset_scope_dim)
@@ -217,7 +216,6 @@ def get_segments(
             segment_end = to_datetime_conditional(
                 dataset_scope_dim["end"], _segment_slice
             )
-
             if mode[dim] == "overlap":
                 # 1. Determine the "epsilon" (smallest unit) for the current data type
                 if is_datetime(segment_start):
@@ -231,11 +229,11 @@ def get_segments(
                     ref_val = to_datetime_conditional(reference[dim], _segment_slice)
                 
                 # 3. Calculate how many strides to back up.
-                # We subtract epsilon to ensure that if segment_start is EXACTLY on 
-                # the boundary of the next window, we don't count it as an overlap.
-                num_strides = math.floor((segment_start - ref_val - epsilon) / _segment_stride)
+                # We add epsilon to handle floating point inaccuracies (e.g. 0.9999h -> 1.0h)
+                # and ensure we land in the correct bin, strictly excluding the previous bin
+                # if we are exactly on the boundary.
+                num_strides = math.floor((segment_start - ref_val + epsilon) / _segment_stride)
                 segment_start = ref_val + (num_strides * _segment_stride)
-
                 # 4. Optional: Grid alignment (only if reference is provided)
                 if dim in reference:
                     segment_start = (
@@ -273,7 +271,6 @@ def get_segments(
         else:
             # Python's range(start, stop) is already exclusive of 'stop'
             iterator = range(int(segment_start), int(segment_end), int(_segment_stride))
-            
         slices = []
         for start in iterator:
             end = start + _segment_slice
