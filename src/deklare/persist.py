@@ -544,6 +544,8 @@ except ImportError:
 
 def merge_xarray(data, deskriptor):
     data = [d for d in data if d is not None]
+    if len(data) == 0:
+        return None
     if len(data) == 1:
         merged_dataset = data[0]
     else:
@@ -587,6 +589,7 @@ class ChunkPersister:
         use_memorycache=True,
         cache = None,
         hash_filter=None,
+        pre_filter=lambda x: x,
     ):
         """Chunks every incoming dekriptor into subchunks if deskriptor is larger than segment_slice
          or extends the deskriptor to the respective chunksize if deskriptor is smaller than segment_slice
@@ -608,7 +611,7 @@ class ChunkPersister:
         #     classification_scope = None
         # else:
         #     self.classification_scope = None
-
+        self.pre_filter = pre_filter
         self.use_memorycache = use_memorycache
         if cache is None:
             cache = LRUCache(10)
@@ -729,36 +732,44 @@ class ChunkPersister:
         )
         cloned_deskriptors = []
         cloned_persisters = []
-        for segment in segments:
+        for i, segment in enumerate(segments):
             segment_deskriptor = deepcopy(deskriptor)
             if "self" in segment_deskriptor:
                 del segment_deskriptor["self"]
             dict_update(segment_deskriptor, segment)
-            cloned_deskriptors += [segment_deskriptor]
-            cloned_persister = Persister(
-                store=self.store,
-                storage_manager=self.storage_manager,
-                stac_io=self.stac_io,
-                global_lock=self.mutex,
-                save_metadata=self.save_metadata,
-                cache = self.cache,
-                use_memorycache=self.use_memorycache,
-                hash_filter=self.hash_filter
-            )
-            cloned_persister.dask_key_name = self.dask_key_name + "_persister"
-            dict_update(
-                segment_deskriptor,
-                {
-                    "config": {
-                        "keys": {
-                            self.dask_key_name + "_persister": {
-                                "force_update": rs.get("force_update", False)
+            processed_deskriptors = self.pre_filter(segment_deskriptor)
+            if not isinstance(processed_deskriptors, list):
+                if processed_deskriptors:
+                    processed_deskriptors = [processed_deskriptors]
+                else:
+                    processed_deskriptors = []
+            
+            for j, segment_deskriptor in enumerate(processed_deskriptors):
+                cloned_deskriptors += [segment_deskriptor]
+                cloned_persister = Persister(
+                    store=self.store,
+                    storage_manager=self.storage_manager,
+                    stac_io=self.stac_io,
+                    global_lock=self.mutex,
+                    save_metadata=self.save_metadata,
+                    cache = self.cache,
+                    use_memorycache=self.use_memorycache,
+                    hash_filter=self.hash_filter
+                )
+                cloned_persister.dask_key_name = f"{self.dask_key_name}_persister_{i}_{j}"
+                dict_update(
+                    segment_deskriptor,
+                    {
+                        "config": {
+                            "keys": {
+                                cloned_persister.dask_key_name: {
+                                    "force_update": rs.get("force_update", False)
+                                }
                             }
                         }
-                    }
-                },
-            )
-            cloned_persisters += [cloned_persister.compute]
+                    },
+                )
+                cloned_persisters += [cloned_persister.compute]
 
         # Insert predecessor
         # new_deskriptor = {}
