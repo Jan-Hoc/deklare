@@ -357,10 +357,10 @@ class PermissiveDescriptor(Descriptor):
         data = _transform_to_nested(data)
 
         for key, value in data.items():
-            field_info = cls.model_fields[key]
-            if DatetimeRange in get_args(field_info.annotation) and isinstance(value, dict):
+            field_info = cls.model_fields.get(key)
+            if field_info and DatetimeRange in get_args(field_info.annotation) and isinstance(value, dict):
                 kwargs[key] = DatetimeRange(**value)
-            elif Range in get_args(field_info.annotation) and isinstance(value, dict):
+            elif field_info and Range in get_args(field_info.annotation) and isinstance(value, dict):
                 kwargs[key] = Range(**value)
             else:
                 kwargs[key] = value

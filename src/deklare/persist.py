@@ -125,7 +125,7 @@ class Persister:
 
         with self._mutex:
             if descriptor.get_config("use_memorycache", True) and data_path in self.cache:
-                descriptor.config["remove_dependencies"] = True
+                descriptor._deklare_attrs["remove_dependencies"] = True
                 # set the compute action to load
                 descriptor.config["action"] = "load_from_cache"
                 return descriptor
@@ -136,14 +136,14 @@ class Persister:
             # while holding the mutex, we need to check if the file exists
             if file_in_store(self.store,data_path):
                 # remove previous node since we are going to load from disk
-                descriptor.config["remove_dependencies"] = True
+                descriptor._deklare_attrs["remove_dependencies"] = True
 
                 # set the compute action to load
                 descriptor.config["action"] = "load"
                 return descriptor
             elif file_in_store(self.store,"fail/" + descriptor_hash):
                 # remove previous node since we are going to load the fail info from disk
-                descriptor.config["remove_dependencies"] = True
+                descriptor._deklare_attrs["remove_dependencies"] = True
                 descriptor.config["descriptor_hash"] = "fail/" + descriptor_hash
 
                 # set the compute action to load
@@ -157,7 +157,7 @@ class Persister:
         return descriptor
 
     @accept_dict_descriptor(arg_name="descriptor")
-    def compute(self, data: DataContainer | None, descriptor: Descriptor) -> DataContainer:  # noqa: C901
+    def compute(self, data: DataContainer | None = None, descriptor: Descriptor | None = None) -> DataContainer:  # noqa: C901
         descriptor = descriptor or Descriptor()
 
         if descriptor.config["action"] == "passthrough":
@@ -199,14 +199,14 @@ class Persister:
                     #     data.write(f)
                     failed_path = "fail/" + descriptor["descriptor_hash"]
                     substore = make_sub_store(self.store,failed_path)
-                    data.write(substore)
+                    data.write(substore,copy_data=True)
                 else:
                     if isinstance(data, str):
                         raise RuntimeError(f"something wrong {data}")
 
                     try:
                         substore = make_sub_store(self.store,data_path)
-                        data.write(substore)
+                        data.write(substore,copy_data=True)
                     except Exception as e:
                         # self.store.dirfs.rm(data_path)
                         raise e
