@@ -57,10 +57,10 @@ def deklare_flow(
 
     def query_class(self, descriptor: Descriptor, plan=False) -> Any:  # noqa: ANN001, ANN401, ARG001
         """wrapper for query function for classes with self attribute"""
-        return query(descriptor,plan=plan)
+        return query(descriptor, plan=plan)
 
     @accept_dict_descriptor(arg_name="descriptor", descriptor_cls=template_descriptor)
-    def query(descriptor: Descriptor, plan=False) -> Any:  # noqa: ANN401
+    def query(descriptor: Descriptor, plan: bool = False) -> Any:  # noqa: ANN401
         """query function to get data corresponding to descriptor"""
         if config_descriptor:
             descriptor = (template_descriptor or PermissiveDescriptor).update_from_config_dict(

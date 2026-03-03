@@ -19,11 +19,13 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Iterable, Type
 
+import obstore as obs
 import pystac
 from cachetools import Cache, LRUCache
 
 # TODO: can we implement our own hash function for descriptors to reduce dependency on dask?
 from dask.base import tokenize
+from obstore.store import LocalStore, ObjectStore, Store
 
 from .core import task
 from .data_io import DataContainer, MediaDescription, StacIO
@@ -35,14 +37,11 @@ from .utils import (
 )
 
 
-import obstore 
-import obstore as obs
-
-def file_in_store(store,data_path):
+def file_in_store(store: Store, data_path: str | Path) -> bool:
     try:
         obs.head(store, data_path)
         return True
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         try:
             next(iter(obs.list(store, prefix=data_path)))
             return True
@@ -50,27 +49,28 @@ def file_in_store(store,data_path):
             # The list was empty, so the path truly does not exist
             return False
 
-from obstore.store import LocalStore
-def make_sub_store(parent_store, sub_path: str):
+
+def make_sub_store(parent_store: Store, sub_path: str) -> Store:
     """
     Creates a new LocalStore instance rooted inside the parent_store's prefix.
     """
     # 1. Get the current prefix (defaulting to empty string if None)
     # obstore stores prefix as a Path object or None
     current_prefix = getattr(parent_store, "prefix", None) or ""
-    
+
     # 2. Join the old prefix with the new sub-path
     # We use pathlib to handle slash consistency automatically
-    new_prefix = Path(current_prefix) / sub_path    
+    new_prefix = Path(current_prefix) / sub_path
     # 3. Return a NEW instance pointing to this deeper folder
-    return LocalStore(prefix=new_prefix,mkdir=True)
+    return LocalStore(prefix=new_prefix, mkdir=True)
+
 
 @task()
 class Persister:
     def __init__(
         self,
         data_container: Type[DataContainer],
-        store: obstore.store.ObjectStore = None,
+        store: ObjectStore | None = None,
         stac_io: StacIO | None = None,
         selected_keys: Iterable | None = None,
         force_update: bool = False,
@@ -78,11 +78,11 @@ class Persister:
         cache: Cache | None = None,
         global_lock: Lock = None,
         save_metadata: bool = False,
-        hash_filter=None,
+        hash_filter: callable | None = None,
     ) -> None:
         super().__init__(Descriptor(config={"force_update": force_update, "use_memorycache": use_memorycache}))
         if isinstance(store, str) or isinstance(store, Path):
-            store = LocalStore(prefix=store,mkdir=True)
+            store = LocalStore(prefix=store, mkdir=True)
         self.store = store
         self.data_container = data_container
 
@@ -101,7 +101,7 @@ class Persister:
 
         if hash_filter is not None and not callable(hash_filter):
             raise RuntimeError("hash_filter has to be a callable")
-        
+
         self.hash_filter = hash_filter
 
     def configure(self, descriptor: Descriptor) -> Descriptor:
@@ -134,14 +134,14 @@ class Persister:
                 return descriptor
 
             # while holding the mutex, we need to check if the file exists
-            if file_in_store(self.store,data_path):
+            if file_in_store(self.store, data_path):
                 # remove previous node since we are going to load from disk
                 descriptor._deklare_attrs["remove_dependencies"] = True
 
                 # set the compute action to load
                 descriptor.config["action"] = "load"
                 return descriptor
-            elif file_in_store(self.store,"fail/" + descriptor_hash):
+            elif file_in_store(self.store, "fail/" + descriptor_hash):
                 # remove previous node since we are going to load the fail info from disk
                 descriptor._deklare_attrs["remove_dependencies"] = True
                 descriptor.config["descriptor_hash"] = "fail/" + descriptor_hash
@@ -168,14 +168,13 @@ class Persister:
             data_path = f"data/{descriptor.config['descriptor_hash']}"
 
         # if descriptor.config["action"] == "load_from_cache":
-            # with self._mutex:
-            #     if data_path in self.cache:
-            #         cached = self.cache[data_path]
-            #         return cached
+        # with self._mutex:
+        #     if data_path in self.cache:
+        #         cached = self.cache[data_path]
+        #         return cached
         if descriptor.config["action"] == "load" or descriptor.config["action"] == "load_from_cache":
-            substore = make_sub_store(self.store,data_path)
+            substore = make_sub_store(self.store, data_path)
             data = self.data_container.read(substore)
-            
 
             # with self._mutex:
             #     self.cache[data_path] = data
@@ -198,15 +197,15 @@ class Persister:
                     # with self.store.dirfs.open("fail/" + descriptor.config("descriptor_hash"), "wb") as f:
                     #     data.write(f)
                     failed_path = "fail/" + descriptor["descriptor_hash"]
-                    substore = make_sub_store(self.store,failed_path)
-                    data.write(substore,copy_data=True)
+                    substore = make_sub_store(self.store, failed_path)
+                    data.write(substore)
                 else:
                     if isinstance(data, str):
                         raise RuntimeError(f"something wrong {data}")
 
                     try:
-                        substore = make_sub_store(self.store,data_path)
-                        data.write(substore,copy_data=True)
+                        substore = make_sub_store(self.store, data_path)
+                        data.write(substore)
                     except Exception as e:
                         # self.store.dirfs.rm(data_path)
                         raise e
@@ -302,12 +301,13 @@ def _string_timestamp(o: object) -> str:
     else:
         return str(o)
 
+
 @task()
 class ChunkPersister:
     def __init__(
         self,
         data_container: Type[DataContainer],
-        store: obstore.store.ObjectStore | None = None,
+        store: ObjectStore | None = None,
         dim: str = "time",
         segment_slice: dict | Callable[..., dict] | None = None,
         segment_stride: dict | Callable[..., dict] | None = None,
@@ -319,8 +319,8 @@ class ChunkPersister:
         save_metadata: bool = False,
         use_memorycache: bool = True,
         cache: Cache | None = None,
-        hash_filter=None,
-        pre_filter=lambda x: x,
+        hash_filter: callable | None = None,
+        pre_filter: callable | None = lambda x: x,
     ) -> None:
         """Chunks every incoming descriptor into subchunks if descriptor is larger than segment_slice
          or extends the descriptor to the respective chunksize if descriptor is smaller than segment_slice
@@ -380,9 +380,8 @@ class ChunkPersister:
         if store is None:
             raise RuntimeError("Either filesystem or store must be provided")
 
-
         if isinstance(store, str) or isinstance(store, Path):
-            store = LocalStore(prefix=store,mkdir=True)
+            store = LocalStore(prefix=store, mkdir=True)
 
         self.store = store
 
@@ -406,7 +405,7 @@ class ChunkPersister:
                 )
 
         self.mutex = Lock()
-        
+
         if hash_filter is not None and not callable(hash_filter):
             raise RuntimeError("hash_filter has to be a callable")
         self.hash_filter = hash_filter
@@ -414,7 +413,7 @@ class ChunkPersister:
     def __dask_tokenize__(self) -> tuple:
         return (ChunkPersister,)
 
-    def configure(self, descriptor: Descriptor) -> Descriptor:
+    def configure(self, descriptor: Descriptor) -> Descriptor:  # noqa: C901
         rs = descriptor.config
         rs.update(self.config.config)
         if rs.get("bypass", False):
@@ -465,7 +464,7 @@ class ChunkPersister:
                     processed_descriptors = [processed_descriptors]
                 else:
                     processed_descriptors = []
-            
+
             for j, segment_descriptor in enumerate(processed_descriptors):
                 cloned_descriptors += [segment_descriptor]
                 cloned_persister = Persister(
@@ -482,11 +481,7 @@ class ChunkPersister:
                     segment_descriptor,
                     {
                         "config": {
-                            "keys": {
-                                cloned_persister.dask_key_name: {
-                                    "force_update": rs.get("force_update", False)
-                                }
-                            }
+                            "keys": {cloned_persister.dask_key_name: {"force_update": rs.get("force_update", False)}}
                         }
                     },
                 )

@@ -2,10 +2,11 @@ import traceback
 from typing import Any, Callable, Iterable, TypeVar
 
 import numpy as np
-try: 
+
+try:
     import torch
-except:
-   RuntimeWarning("Failed to load torch. Install it to use threaded (pre-)loading of datasets")
+except Exception:
+    RuntimeWarning("Failed to load torch. Install it to use threaded (pre-)loading of datasets")
 
 
 from tqdm import tqdm

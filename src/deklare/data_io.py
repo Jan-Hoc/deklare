@@ -14,16 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License."""
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
 from typing import IO, Any, Iterable, NamedTuple, Self, TypeVar
 
 import numpy as np
+import obstore
+import pandas as pd
 import pystac
 import xarray as xr
 from shapely.geometry import Polygon, mapping
 
 from .descriptor import DatetimeRange, Descriptor, Range
-import obstore
 
 Index = TypeVar(
     "Index",
@@ -80,7 +80,7 @@ class StacIO(pystac.StacIO):
 
         response = self.store.get(str_src)
         return bytes(response.bytes()).decode()
-    
+
     def write_text(self, dest: pystac.utils.HREF, txt: str, *args, **kwargs) -> None:  # noqa: ANN002, ANN003, ARG002
         """writes the data of `txt` into the store to `dest`
 
@@ -311,9 +311,7 @@ class XArrayContainer(DataContainer):
 
         time = None
         if "time" in self.data.coords:
-            t0 = self.data["time"].values[0]
-            ts = t0.astype("datetime64[ns]").astype("int64") / 1e9
-            time = datetime.fromtimestamp(ts, timezone.utc).isoformat()
+            time = pd.Timestamp(self.data["time"].values[0], tz="UTC").isoformat()
 
         item = {
             "type": "Feature",

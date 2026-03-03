@@ -565,12 +565,13 @@ def optimize(
     return collection
 
 
-def compute(graph: Graph, descriptor: Descriptor, plan=False) -> Any:  # noqa: ANN401
+def compute(graph: Graph, descriptor: Descriptor, plan: bool = False) -> Any:  # noqa: ANN401
     configured_graph = configuration(graph, descriptor)
     if plan:
         return configured_graph
     computed_result = dask.compute(configured_graph)[0]
     return computed_result
+
 
 def _normalize_node(key: str, dsk_dict: dict) -> None:
     # any node that does not have the following structure will get it

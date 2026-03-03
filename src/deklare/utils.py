@@ -16,6 +16,7 @@ limitations under the License."""
 import itertools
 import math
 import warnings
+from datetime import datetime
 from typing import Any, Iterable, get_args
 
 import pandas as pd
@@ -47,19 +48,19 @@ def indexers_to_slices(indexers: dict) -> dict:
     return new_indexers
 
 
-def exclusive_indexing(x: xr.DataArray, indexers: dict) -> xr.DataArray:
+def exclusive_indexing(x: xr.DataArray, indexers: dict) -> xr.DataArray:  # noqa: C901
     for k, v in indexers.items():
-        if not isinstance(v,dict):
+        if not isinstance(v, dict):
             continue
         end_val = v.get("end")
-        
+
         if k not in x.coords or end_val is None:
             continue
 
         # 1. Grab the underlying pandas index to check metadata
         #    This is instant (does not scan data)
         idx = x.indexes.get(k)
-        
+
         # 2. Case A: Sorted Increasing (Standard Time Series)
         if idx is not None and idx.is_monotonic_increasing:
             if x.sizes[k] > 0:
@@ -70,10 +71,10 @@ def exclusive_indexing(x: xr.DataArray, indexers: dict) -> xr.DataArray:
 
         # 3. Case B: Sorted Decreasing (Rare, but possible)
         elif idx is not None and idx.is_monotonic_decreasing:
-             if x.sizes[k] > 0:
+            if x.sizes[k] > 0:
                 # In a decreasing list, the "end" value would be at the start (index 0)
                 # assuming the user meant "exclude values <= end"
-                # If the user meant "exclude values >= end", logic flips. 
+                # If the user meant "exclude values >= end", logic flips.
                 # Assuming standard "drop this specific label" logic:
                 if x[k].isel({k: 0}).item() == end_val:
                     x = x.isel({k: slice(1, None)})
@@ -159,9 +160,10 @@ def to_datetime(x: DatetimeScalar, **kwargs: Any) -> NaTType:  # noqa: ANN401
 
 def is_datetime(x: Any) -> bool:  # noqa: ANN401
     """Checks if input is a datetime-like scalar or array."""
-    if isinstance(x, (pd.Timestamp, datetime)): # check also for , np.datetime64
+    if isinstance(x, (pd.Timestamp, datetime)):  # check also for , np.datetime64
         return True
     return pd.api.types.is_datetime64_any_dtype(x)
+
 
 def to_datetime_conditional(x: Any, condition: bool | DatetimeScalar | pd.Timedelta = True, **kwargs: Any) -> xr:  # noqa: ANN401
     # converts x to datetime if condition is true or the object in condition is datetime or timedelta
@@ -200,7 +202,7 @@ def get_segments(  # noqa: C901
 
         _segment_slice = segment_slice[dim]
         _segment_stride = segment_stride.get(dim, _segment_slice)
-#        print(_segment_slice,_segment_stride)
+        #        print(_segment_slice,_segment_stride)
         dataset_scope_dim = dataset_scope[dim]
         if not isinstance(dataset_scope_dim, (list, Range, dict)):
             dataset_scope_dim = [dataset_scope_dim]
@@ -227,12 +229,8 @@ def get_segments(  # noqa: C901
                 if _segment_slice * _segment_stride < 0:
                     _segment_slice *= -1
 
-            segment_start = to_datetime_conditional(
-                dataset_scope_dim["start"], _segment_slice
-            )
-            segment_end = to_datetime_conditional(
-                dataset_scope_dim["end"], _segment_slice
-            )
+            segment_start = to_datetime_conditional(dataset_scope_dim["start"], _segment_slice)
+            segment_end = to_datetime_conditional(dataset_scope_dim["end"], _segment_slice)
             if mode[dim] == "overlap":
                 # 1. Determine the "epsilon" (smallest unit) for the current data type
                 if is_datetime(segment_start):
@@ -244,7 +242,7 @@ def get_segments(  # noqa: C901
                 ref_val = 0
                 if dim in reference:
                     ref_val = to_datetime_conditional(reference[dim], _segment_slice)
-                
+
                 # 3. Calculate how many strides to back up.
                 # We add epsilon to handle floating point inaccuracies (e.g. 0.9999h -> 1.0h)
                 # and ensure we land in the correct bin, strictly excluding the previous bin
@@ -253,11 +251,7 @@ def get_segments(  # noqa: C901
                 segment_start = ref_val + (num_strides * _segment_stride)
                 # 4. Optional: Grid alignment (only if reference is provided)
                 if dim in reference:
-                    segment_start = (
-                        math.ceil((segment_start - ref_val) / _segment_stride)
-                        * _segment_stride
-                        + ref_val
-                    )
+                    segment_start = math.ceil((segment_start - ref_val) / _segment_stride) * _segment_stride + ref_val
             elif mode[dim] == "fit":
                 if dim in reference:
                     ref_dim = to_datetime_conditional(reference[dim], _segment_slice)
@@ -270,14 +264,10 @@ def get_segments(  # noqa: C901
         if isinstance(segment_slice[dim], pd.Timedelta):
             # Determine the smallest possible step to make the end exclusive
             epsilon = pd.Timedelta(nanoseconds=1)
-            
-            # We stop at (segment_end - epsilon) to ensure segment_end is never 
+
+            # We stop at (segment_end - epsilon) to ensure segment_end is never
             # included as a 'start' point.
-            iterator = pd.date_range(
-                start=segment_start, 
-                end=segment_end - epsilon, 
-                freq=_segment_stride
-            )
+            iterator = pd.date_range(start=segment_start, end=segment_end - epsilon, freq=_segment_stride)
             segment_end = pd.to_datetime(segment_end)
         else:
             # Python's range(start, stop) is already exclusive of 'stop'
